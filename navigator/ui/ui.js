@@ -294,7 +294,7 @@ function renderChrome(c) {
   chromeEl.replaceChildren(...parts);
   chromeEl.hidden = false;
   // A window that connects mid-flow still shows the pending prompt.
-  const pending = c.auth?.[0];
+  const pending = c.prompts?.[0];
   if (pending && activePrompt?.id !== pending.id) showAuth(pending);
 }
 
@@ -305,9 +305,24 @@ function renderChrome(c) {
 const dialog = document.getElementById("auth");
 let activePrompt = null;
 
+/** "$4.00": minor units scaled by the currency's own number of decimals. */
+function money(minor, currency) {
+  try {
+    const f = new Intl.NumberFormat(undefined, { style: "currency", currency });
+    return f.format(minor / 10 ** f.resolvedOptions().maximumFractionDigits);
+  } catch {
+    return `${minor} ${currency}`;
+  }
+}
+
 function describe(p) {
   const who = `${p.app.name} (${p.app.domain})`;
   switch (p.flow) {
+    case "payment":
+      return {
+        title: `Pay ${money(p.summary.total_minor, p.summary.currency)} to ${p.app.name}`,
+        text: `${who} is asking you to pay. You will enter your payment details on ${p.handlerHost}; ${p.app.domain} never sees them.`,
+      };
     case "oidc":
       return { title: `Sign in with ${p.issuerHost}`, text: `${who} wants to sign you in using ${p.issuerHost}. A new window will open on that site.` };
     case "passkey-create":
@@ -325,7 +340,18 @@ function showAuth(p) {
   const status = h("p", { role: "status", id: "auth-status" });
   cont.addEventListener("click", () => proceed(p, cont, status));
   cancel.addEventListener("click", cancelAuth);
-  dialog.replaceChildren(h("h2", { id: "auth-title" }, d.title), h("p", {}, d.text), status, h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }, ""));
+  const parts = [h("h2", { id: "auth-title" }, d.title), h("p", {}, d.text)];
+  if (p.flow === "payment") {
+    // The lines come from the app's server, validated by the host. The total equals their sum.
+    const list = h("ul", { class: "pay-lines" });
+    for (const i of p.summary.items) {
+      list.append(h("li", {}, `${i.label}${i.quantity > 1 ? ` × ${i.quantity}` : ""}: ${money(i.amount_minor * i.quantity, p.summary.currency)}`));
+    }
+    const total = h("p", {}, `Total: ${money(p.summary.total_minor, p.summary.currency)}`);
+    total.style.fontWeight = "600";
+    parts.push(list, total);
+  }
+  dialog.replaceChildren(...parts, status, h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }, ""));
   dialog.lastChild.append(cont, cancel);
   if (!dialog.open) dialog.showModal();
   cont.focus();
@@ -339,17 +365,19 @@ function closeAuth(id) {
 }
 
 function cancelAuth() {
-  if (activePrompt) post("auth/cancel", { id: activePrompt.id });
+  if (activePrompt) post("prompt/cancel", { id: activePrompt.id });
 }
 dialog.addEventListener("cancel", (e) => { e.preventDefault(); cancelAuth(); });
 
 async function proceed(p, button, status) {
   button.disabled = true;
-  if (p.flow === "oidc") {
-    // Opened on the user's click so the browser allows it; noopener keeps the provider's page from
+  if (p.flow === "oidc" || p.flow === "payment") {
+    // Opened on the user's click so the browser allows it; noopener keeps the other site's page from
     // reaching back into this one.
     window.open(p.url, "_blank", "noopener");
-    status.textContent = "Waiting for you to finish signing in in the other window\u2026";
+    status.textContent = p.flow === "payment"
+      ? "Waiting for you to finish paying in the other window\u2026"
+      : "Waiting for you to finish signing in in the other window\u2026";
     return;
   }
   try {
@@ -384,7 +412,7 @@ events.onmessage = (e) => {
     renderChrome(msg.chrome);
   } else if (msg.kind === "notice") notice(msg.message);
   else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); renderChrome(msg.chrome); }
-  else if (msg.kind === "auth") showAuth(msg.prompt);
-  else if (msg.kind === "auth-end") closeAuth(msg.id);
+  else if (msg.kind === "prompt") showAuth(msg.prompt);
+  else if (msg.kind === "prompt-end") closeAuth(msg.id);
 };
 addEventListener("popstate", () => navigate(location.pathname + location.search, { push: false }));

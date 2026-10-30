@@ -110,41 +110,25 @@ interface auth {
     passkey-assert: func(options: list<u8>) -> result<list<u8>, host-error>;
 }
 
-/// Capability: payments.request, payments.mandate
+/// Capability: payments.request (hosted checkout; see spec/payments.md)
 interface payments {
     use types.{host-error};
 
-    record line-item {
-        label: string,
-        /// Minor currency units (cents). Informational: the server computes the charged amount.
-        amount-minor: s64,
-        quantity: u32,
-    }
-
-    record payment-request {
-        /// ISO 4217 code, e.g. "USD".
-        currency: string,
-        items: list<line-item>,
-        /// Server-issued reference binding this request to an order. The token is bound to it.
+    /// The user finished the processor's flow and was sent back. This is NOT proof of payment: the
+    /// app must ask its own server, which acts only on the processor's signed webhook.
+    record payment-receipt {
         order-ref: string,
-        /// Restrict to one handler named in manifest `payments.handlers`.
-        handler: option<string>,
-        /// Ask the user to also approve recurring charges (`payments.mandate`).
-        recurring: bool,
-    }
-
-    /// Single-use. Bound to origin, merchant, `order-ref` and total. The app forwards it to its
-    /// own server, which completes the charge with the payment processor.
-    record payment-token {
+        /// The processor that handled it, e.g. "stripe".
         handler: string,
-        token: string,
-        /// Unix seconds.
-        expires-at: u64,
     }
 
-    /// The host draws the payment sheet, tokenises, and runs strong customer authentication.
-    /// The app never sees card data. Returns `cancelled` if the user dismisses the sheet.
-    request: func(request: payment-request) -> result<payment-token, host-error>;
+    /// Ask the user to pay for an order the app's server has already created. The app supplies only
+    /// the order reference. The host gets the amount and the checkout URL from the server itself,
+    /// shows a sheet drawn from that, opens the processor's page, and waits for the user to return.
+    /// The app never sees card details, a price it chose, or a URL it chose.
+    /// Errors: `cancelled` (the user declined or closed the checkout), `invalid-argument` (the server
+    /// refused the order, or sent something the host will not show), `unavailable`.
+    request: func(order-ref: string) -> result<payment-receipt, host-error>;
 }
 
 /// Capability: analytics.event

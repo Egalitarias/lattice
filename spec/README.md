@@ -7,6 +7,7 @@
 | [`capabilities.md`](capabilities.md) | Capability catalog and rules |
 | [`api.schema.json`](api.schema.json), [`rpc.md`](rpc.md) | Typed RPC: the API description format and the wire protocol |
 | [`auth.md`](auth.md) | Authentication: sessions, `Lattice-Set-Session`, OIDC, passkeys, what the host and server each verify |
+| [`payments.md`](payments.md) | Payments: hosted checkout, who states the price, webhooks as the source of truth |
 | [`wit/`](wit/README.md) | Component interface (WIT): how an app and Lattice Navigator talk, and capabilities as imports |
 
 ## Conventions

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SignJWT, generateKeyPair, exportJWK } from "jose";
+import { withStack, find, all, sleep, quiet, listen, close, b64u, tasksDir, SHARED_CACHE } from "./stack.mjs";
 import { loadApp, createServer } from "../../server/server.mjs";
 import { startIdp } from "../../server/dev-idp.mjs";
 import { createAuth, defaultOriginAllowed } from "../../server/auth.mjs";
@@ -20,111 +21,7 @@ import { RpcClient, SessionStore, parseSetSession, applySessionHeaders } from ".
 import { encode, decode } from "../../shared/cbor.mjs";
 import { FakeAuthenticator } from "./fake-authenticator.mjs";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const tasksDir = resolve(here, "..", "..", "examples", "tasks");
-const quiet = () => {};
-// Transpiled components are content-addressed, so every test can share one cache.
-const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const listen = (server) => new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server.address().port)));
-const close = (server) => new Promise((ok) => { server.close(ok); server.closeAllConnections?.(); });
-const find = (n, pred) => (pred(n) ? n : n.children.map((c) => find(c, pred)).find(Boolean));
-const all = (n, pred, out = []) => (pred(n) && out.push(n), n.children.forEach((c) => all(c, pred, out)), out);
-const b64u = (b) => Buffer.from(b).toString("base64url");
-
-// ---- A complete stack: dev IdP + tasks origin + Navigator ---------------------------------------
-
-async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true } = {}) {
-  const idp = await startIdp({ clientSecret });
-  const app = await loadApp({
-    appDir: tasksDir,
-    oidc: trustIdp ? [{ issuer: idp.issuer, clientId: idp.clientId, clientSecret }] : [],
-    dev: true,
-    log: quiet,
-  });
-  if (requires) app.manifest.capabilities = { requires };
-  const origin = createServer(app);
-  const originPort = await listen(origin);
-  const dir = mkdtempSync(join(tmpdir(), "nav-auth-"));
-  const nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet, authTimeoutMs, watchdogMs });
-
-  const call = (path, body) =>
-    fetch(`http://127.0.0.1:${nav.port}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Navigator": "1", Host: `tasks.localhost:${nav.port}` },
-      body: JSON.stringify(body),
-    }).then(async (r) => ({ status: r.status, body: await r.json() }));
-  const state = () => fetch(`http://127.0.0.1:${nav.port}/_navigator/state`).then((r) => r.json());
-
-  const h = {
-    nav, idp, app, originPort, dir, state, call,
-    act: (source, values = {}, event = "press") => call("/_navigator/act", { source, event, values }),
-    button: async (text) => find((await state()).tree, (n) => n.type === "button" && n.props.text === text),
-    tasks: async () => all((await state()).tree, (n) => n.type === "checkbox").map((n) => n.props.label),
-    async press(text, values) {
-      const b = await h.button(text);
-      assert.ok(b, `button "${text}" exists`);
-      return h.act(b.id, values);
-    },
-    /** Resolves once a prompt of this flow is pending, as the user's window would see it. */
-    async waitPrompt(flow, timeout = 5000) {
-      const end = Date.now() + timeout;
-      while (Date.now() < end) {
-        const p = (await state()).chrome.auth.find((p) => p.flow === flow);
-        if (p) return p;
-        await sleep(25);
-      }
-      throw new Error(`no ${flow} prompt appeared`);
-    },
-    /** The user logs in at the identity provider; returns the redirect back to Navigator. */
-    async userLogin(authUrl, who = "alice") {
-      const page = await fetch(authUrl, { redirect: "manual" });
-      const rid = /name="rid" value="([^"]+)"/.exec(await page.text())[1];
-      const r = await fetch(`${idp.issuer}/authorize/decision`, {
-        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, user: who }), redirect: "manual",
-      });
-      return r.headers.get("location");
-    },
-    /** The browser follows the IdP's redirect to Navigator's callback. */
-    callback(locationUrl, extra = "") {
-      const u = new URL(locationUrl);
-      return new Promise((done, fail) => {
-        http.get({ host: "127.0.0.1", port: nav.port, path: u.pathname + u.search + extra, headers: { Host: u.host } }, (res) => {
-          let body = "";
-          res.on("data", (c) => (body += c));
-          res.on("end", () => done({ status: res.statusCode, body, headers: res.headers }));
-        }).on("error", fail);
-      });
-    },
-    /** Click "Sign in with <idp>" and complete it as `who`. */
-    async signInOidc(who = "alice") {
-      const pending = h.press(`Sign in with 127.0.0.1:${idp.port}`);
-      const prompt = await h.waitPrompt("oidc");
-      const loc = await h.userLogin(prompt.url, who);
-      const cb = await h.callback(loc);
-      return { res: await pending, prompt, cb };
-    },
-    signOut: () => call("/_navigator/signout", {}),
-    /** Ask the origin directly, as some other client holding a given session token. */
-    async rawRpc(method, body, token) {
-      const res = await fetch(`http://127.0.0.1:${originPort}/rpc/${method}`, {
-        method: "POST",
-        headers: { "Content-Type": RPC_TYPE, "Lattice-Api": app.manifest.api.schema, ...(token ? { "Lattice-Session": token } : {}) },
-        body: encode(body),
-      });
-      return { status: res.status, value: decode(new Uint8Array(await res.arrayBuffer())) };
-    },
-  };
-  try {
-    return await fn(h);
-  } finally {
-    await nav.close();
-    await close(origin);
-    await idp.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
 
 // ---- OIDC end to end ----------------------------------------------------------------------------
 
@@ -191,7 +88,7 @@ test("oidc: the callback is bound to one pending request, once", async () => {
     let prompt = await h.waitPrompt("oidc");
     const forged = await h.callback(`${h.nav.uiOrigin}/_navigator/auth/callback?code=whatever&state=${b64u(randomBytes(32))}`);
     assert.equal(forged.status, 400);
-    assert.equal((await h.state()).chrome.auth.length, 1, "the real prompt is still pending");
+    assert.equal((await h.state()).chrome.prompts.length, 1, "the real prompt is still pending");
     const loc = await h.userLogin(prompt.url);
     assert.equal((await h.callback(loc)).status, 200);
     assert.equal((await pending).status, 200);
@@ -206,7 +103,7 @@ test("oidc: the callback is bound to one pending request, once", async () => {
     const loc2 = await h.userLogin(prompt.url);
     // Appending a second iss is ambiguous and refused; the real sign-in stays pending.
     assert.equal((await h.callback(loc2, "&iss=" + encodeURIComponent("http://evil.example"))).status, 400);
-    assert.equal((await h.state()).chrome.auth.length, 1);
+    assert.equal((await h.state()).chrome.prompts.length, 1);
     // Replacing it is the actual mix-up attack.
     const swapped = new URL(loc2);
     swapped.searchParams.set("iss", "http://evil.example");
@@ -229,7 +126,7 @@ test("oidc: the callback is bound to one pending request, once", async () => {
     prompt = await h.waitPrompt("oidc");
     assert.equal((await h.call("/_navigator/auth/cancel", { id: prompt.id })).status, 200);
     assert.equal((await pending).body.error, "Sign-in was cancelled.");
-    assert.equal((await h.state()).chrome.auth.length, 0);
+    assert.equal((await h.state()).chrome.prompts.length, 0);
   });
 });
 
@@ -240,7 +137,7 @@ test("oidc: an unanswered sign-in times out", async () => {
     assert.equal(r.status, 422);
     assert.equal(r.body.error, "Sign-in was cancelled.");
     assert.ok(Date.now() - t0 < 3000);
-    assert.equal((await h.state()).chrome.auth.length, 0);
+    assert.equal((await h.state()).chrome.prompts.length, 0);
   }, { authTimeoutMs: 300 });
 });
 
@@ -256,8 +153,8 @@ test("capabilities: oidc is refused when the manifest grants only passkeys", asy
     const r = await h.press(`Sign in with 127.0.0.1:${h.idp.port}`);
     assert.equal(r.status, 422);
     assert.match(r.body.error, /Not permitted: auth\.oidc/);
-    assert.equal((await h.state()).chrome.auth.length, 0);
-  }, { requires: ["net.origin", "session", "auth.passkey"] });
+    assert.equal((await h.state()).chrome.prompts.length, 0);
+  }, { requires: ["net.origin", "session", "auth.passkey", "payments.request"] });
 });
 
 test("the watchdog does not kill a component that is waiting on the user", async () => {
@@ -518,12 +415,12 @@ test("host: session headers on RPC responses are applied only when valid, on suc
   try {
     const store = new SessionStore(dir, "x.example");
     const before = store.token();
-    const ok = (res, headers) => { const b = Buffer.from(encode({ signed_in: false, name: "" })); res.writeHead(200, { "Content-Type": RPC_TYPE, ...headers }); res.end(b); };
+    const ok = (res, headers) => { const b = Buffer.from(encode({ signed_in: false, name: "", pro: false })); res.writeHead(200, { "Content-Type": RPC_TYPE, ...headers }); res.end(b); };
 
     reply = (res) => ok(res, { "Lattice-Set-Session": sessionFor("C".repeat(43)) });
     const r = await mk(store).call("profile", encode({}));
     assert.equal(r.ok, true);
-    assert.deepEqual(decode(r.bytes), { signed_in: false, name: "" }, "the app gets the body only; no trace of the header");
+    assert.deepEqual(decode(r.bytes), { signed_in: false, name: "", pro: false }, "the app gets the body only; no trace of the header");
     assert.equal(store.token(), "C".repeat(43));
     assert.equal(store.info().subject, "u_9");
 
@@ -828,6 +725,6 @@ test("host: passkeys are unavailable when the window is not on the app's domain"
 test("host: passkey prompts time out", async () => {
   const { b, msgs, opts } = broker({ timeoutMs: 100 });
   await assert.rejects(b.passkey("assert", opts({ challenge: "abc" })), hostError("cancelled"));
-  assert.equal(msgs.at(-1).kind, "auth-end");
+  assert.equal(msgs.at(-1).kind, "prompt-end");
   assert.equal(b.list().length, 0);
 });

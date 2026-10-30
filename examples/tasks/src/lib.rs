@@ -20,6 +20,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use exports::lattice::app::lifecycle::{ActionCall, Guest, HostEvent, Launch, RouteRequest};
 use lattice::app::auth;
 use lattice::app::log::{self, Level};
+use lattice::app::payments;
 use lattice::app::rpc::{self, RpcError};
 use lattice::app::scene::*;
 use lattice::app::session;
@@ -42,10 +43,14 @@ const ACCOUNT: NodeId = 20;
 const ACC_STACK: NodeId = 29;
 const ACC_STATUS: NodeId = 30;
 const ACC_SIGN_OUT: NodeId = 31;
+const ACC_UPGRADE: NodeId = 32;
 const ACC_PASSKEY_LOGIN: NodeId = 33;
 const ACC_REGISTER_FORM: NodeId = 34;
 const ACC_REGISTER_NAME: NodeId = 35;
 const ACC_REGISTER_BUTTON: NodeId = 36;
+const ACC_PENDING: NodeId = 37;
+const ACC_CHECK: NodeId = 38;
+const ACC_NOTE: NodeId = 39;
 const ACC_OIDC_BASE: NodeId = 40;
 // Task `n` occupies ids ROW_BASE + n*4 .. +2 (row, checkbox, delete button).
 const ROW_BASE: NodeId = 1000;
@@ -62,6 +67,11 @@ struct State {
     tasks: Vec<Task>,
     signed_in: bool,
     name: String,
+    pro: bool,
+    /// An order the user has paid for (as far as the host can tell) but the server has not confirmed yet.
+    pending_order: Option<String>,
+    /// A message about the last payment attempt, shown in the account section.
+    note: Option<String>,
     oidc_issuers: Vec<String>,
     /// Ids of the dynamic nodes currently in the host's scene, so the next update can remove them.
     rendered: Vec<NodeId>,
@@ -110,6 +120,23 @@ struct Nothing {}
 struct Profile {
     signed_in: bool,
     name: String,
+    pro: bool,
+}
+#[derive(Serialize)]
+struct CreateOrder<'a> {
+    sku: &'a str,
+}
+#[derive(Serialize)]
+struct OrderRef<'a> {
+    order_ref: &'a str,
+}
+#[derive(Deserialize)]
+struct Order {
+    order_ref: String,
+}
+#[derive(Deserialize)]
+struct OrderStatus {
+    status: String,
 }
 #[derive(Deserialize)]
 struct Options {
@@ -138,16 +165,20 @@ fn api<Req: Serialize, Res: DeserializeOwned>(method: &str, req: &Req) -> Result
     }
 }
 
-/// A failure from a host sign-in call, as a message for the user.
-fn host_err(e: HostError) -> AppError {
+/// A failure from a host call that asks the user for something ("Sign-in", "Payment"), as a message for the user.
+fn host_err_for(what: &str, e: HostError) -> AppError {
     match e {
-        HostError::Cancelled => AppError::Invalid("Sign-in was cancelled.".into()),
-        HostError::Unavailable(m) => AppError::Invalid(format!("Sign-in is not available: {m}")),
-        HostError::InvalidArgument(m) => AppError::Invalid(format!("Sign-in failed: {m}")),
+        HostError::Cancelled => AppError::Invalid(format!("{what} was cancelled.")),
+        HostError::Unavailable(m) => AppError::Invalid(format!("{what} is not available: {m}")),
+        HostError::InvalidArgument(m) => AppError::Invalid(format!("{what} failed: {m}")),
         HostError::CapabilityDenied(c) | HostError::CapabilityRevoked(c) => AppError::Invalid(format!("Not permitted: {c}")),
         HostError::RateLimited => AppError::Invalid("Please wait a moment and try again.".into()),
         HostError::Internal(m) => AppError::Internal(m),
     }
+}
+
+fn host_err(e: HostError) -> AppError {
+    host_err_for("Sign-in", e)
 }
 
 fn reload() -> Result<(), AppError> {
@@ -162,6 +193,7 @@ fn load_profile() -> Result<(), AppError> {
         let mut s = s.borrow_mut();
         s.signed_in = p.signed_in;
         s.name = p.name;
+        s.pro = p.pro;
     });
     Ok(())
 }
@@ -232,8 +264,33 @@ fn account_nodes() -> Vec<Node> {
         let s = s.borrow();
         let mut nodes = Vec::new();
         if s.signed_in {
-            nodes.push(node(ACC_STACK, stack(Axis::Horizontal, Token::Md), &[ACC_STATUS, ACC_SIGN_OUT]));
-            nodes.push(node(ACC_STATUS, text(&format!("Signed in as {}", s.name)), &[]));
+            let status = if s.pro { format!("Signed in as {} (Pro)", s.name) } else { format!("Signed in as {}", s.name) };
+            let mut kids = vec![ACC_STATUS];
+            if s.note.is_some() {
+                kids.push(ACC_NOTE);
+            }
+            if let Some(_) = &s.pending_order {
+                kids.push(ACC_PENDING);
+                kids.push(ACC_CHECK);
+            } else if !s.pro {
+                kids.push(ACC_UPGRADE);
+            }
+            kids.push(ACC_SIGN_OUT);
+            nodes.push(node(ACC_STACK, stack(Axis::Vertical, Token::Sm), &kids));
+            nodes.push(node(ACC_STATUS, text(&status), &[]));
+            if let Some(n) = &s.note {
+                nodes.push(node(ACC_NOTE, text(n), &[]));
+            }
+            if s.pending_order.is_some() {
+                nodes.push(node(ACC_PENDING, text("Payment submitted. Waiting for the server to confirm it."), &[]));
+                nodes.push(node(ACC_CHECK, button("Check payment", "Check payment", ButtonEmphasis::Secondary, act("check_payment", &[])), &[]));
+            } else if !s.pro {
+                nodes.push(node(
+                    ACC_UPGRADE,
+                    button("Upgrade to Pro for $4.00", "Upgrade to Pro ($4.00)", ButtonEmphasis::Primary, act("buy_pro", &[])),
+                    &[],
+                ));
+            }
             nodes.push(node(ACC_SIGN_OUT, button("Sign out", "Sign out", ButtonEmphasis::Secondary, act("sign_out", &[])), &[]));
         } else {
             let mut kids = vec![ACC_STATUS, ACC_PASSKEY_LOGIN, ACC_REGISTER_FORM];
@@ -436,6 +493,34 @@ fn after_session_change() -> Result<Update, AppError> {
     Ok(refresh(None))
 }
 
+/// Ask the server whether the pending order was paid. If it was, learn what that unlocked.
+fn confirm_payment() -> Result<Update, AppError> {
+    let order = STATE.with(|s| s.borrow().pending_order.clone());
+    let Some(order) = order else { return Ok(refresh(None)) };
+    let st: OrderStatus = api("order_status", &OrderRef { order_ref: &order })?;
+    match st.status.as_str() {
+        "paid" => {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                s.pending_order = None;
+                s.note = None;
+            });
+            load_profile()?;
+            Ok(refresh(None))
+        }
+        "failed" | "expired" => {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                s.pending_order = None;
+                s.note = Some("The payment did not go through, so Pro was not unlocked.".into());
+            });
+            Ok(refresh(None))
+        }
+        // created or pending: the processor's confirmation has not reached the server yet
+        _ => Ok(refresh(None)),
+    }
+}
+
 fn options_text(o: Options) -> Vec<u8> {
     o.options.into_bytes()
 }
@@ -521,8 +606,28 @@ impl Guest for TasksApp {
             }
             "sign_out" => {
                 session::sign_out();
+                STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.pending_order = None;
+                    s.note = None;
+                });
                 after_session_change()
             }
+
+            // ---- Payments ------------------------------------------------------------------
+            // The server prices the order. The host shows the user what the server says and takes them to the
+            // processor. What comes back is "the user returned", not "the user paid": the server decides that.
+            "buy_pro" => {
+                let order: Order = api("create_order", &CreateOrder { sku: "pro" })?;
+                payments::request(&order.order_ref).map_err(|e| host_err_for("Payment", e))?;
+                STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.pending_order = Some(order.order_ref);
+                    s.note = None;
+                });
+                confirm_payment()
+            }
+            "check_payment" => confirm_payment(),
             other => {
                 log::write(Level::Warn, &format!("unknown action {other}"));
                 Err(AppError::Invalid(format!("unknown action {other}")))

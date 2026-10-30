@@ -19,7 +19,8 @@
       "net.origin",
       "session",
       "auth.oidc",
-      "auth.passkey"
+      "auth.passkey",
+      "payments.request"
     ]
   },
   "actions": [
@@ -50,5 +51,14 @@
       }
     ],
     "token_endpoint": "https://tasks.localhost/auth/token"
+  },
+  "payments": {
+    "handlers": [
+      "stripe"
+    ],
+    "merchant": {
+      "domain": "tasks.localhost"
+    },
+    "server": "https://tasks.localhost/pay"
   }
 }

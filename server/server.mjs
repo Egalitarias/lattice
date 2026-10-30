@@ -11,11 +11,12 @@
 //   target/wasm32-wasip2/release/*.wasm   the built component (exactly one)
 //   api.json + api.mjs                optional: API description and its handlers. api.mjs exports either
 //                                     `handlers`, or `setup({ manifest, oidc, dev, log })` returning
-//                                     `{ handlers, http }` where http maps absolute paths to (req, res)
+//                                     `{ handlers, http }` (setup also receives `stripe`: { secretKey, webhookSecret, api }) where http maps absolute paths to (req, res)
 //                                     handlers (e.g. the manifest's auth.token_endpoint).
 //
 // Usage: node server.mjs --app ../examples/tasks [--port 8080] [--domain tasks.localhost]
 //                        [--oidc <issuer>,<client_id>[,<client_secret>]]... [--dev]
+//                        [--stripe-key sk_test_...] [--stripe-webhook-secret whsec_...] [--stripe-api http://127.0.0.1:9200]
 
 import http from "node:http";
 import { createHash } from "node:crypto";
@@ -55,7 +56,7 @@ const schemaValidator = (name) => {
   };
 };
 
-export async function loadApp({ appDir, domain, oidc = [], dev = false, log = console.error }) {
+export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe = null, log = console.error }) {
   const wasm = readFileSync(findComponent(appDir));
   const blobs = new Map();
   const entry = hashOf(wasm);
@@ -75,6 +76,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, log = co
   let rpc = null;
   let rpcPath = null;
   let http = {};
+  let impl = null;
   const apiFile = join(appDir, "api.json");
   if (existsSync(apiFile)) {
     const apiBytes = readFileSync(apiFile);
@@ -86,7 +88,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, log = co
     manifest.api = { ...manifest.api, schema: apiHash };
     rpcPath = new URL(manifest.api.url).pathname.replace(/\/$/, "");
     const mod = await import(pathToFileURL(join(appDir, "api.mjs")).href);
-    const impl = mod.setup ? await mod.setup({ manifest, oidc, dev, log }) : { handlers: mod.handlers, http: mod.http };
+    impl = mod.setup ? await mod.setup({ manifest, oidc, dev, stripe, log }) : { handlers: mod.handlers, http: mod.http };
     http = impl.http ?? {};
     rpc = createRpc({ apiDescription, apiHash, handlers: impl.handlers, log });
   } else if (manifest.api) {
@@ -94,7 +96,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, log = co
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath, http };
+  return { manifest, blobs, rpc, rpcPath, http, impl };
 }
 
 const FALLBACK = (name) => `<!doctype html>
@@ -153,12 +155,19 @@ export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {} 
 }
 
 function args(argv) {
-  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false };
+  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false, stripe: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--port") out.port = Number(argv[++i]);
     else if (argv[i] === "--app") out.app = resolve(argv[++i]);
     else if (argv[i] === "--domain") out.domain = argv[++i];
     else if (argv[i] === "--dev") out.dev = true;
+    else if (argv[i] === "--stripe-key") (out.stripe ??= {}).secretKey = argv[++i];
+    else if (argv[i] === "--stripe-webhook-secret") (out.stripe ??= {}).webhookSecret = argv[++i];
+    else if (argv[i] === "--stripe-api") {
+      // Point the Stripe client at a stand-in (development). Real Stripe needs no override.
+      const u = new URL(argv[++i]);
+      (out.stripe ??= {}).api = { protocol: u.protocol.replace(":", ""), host: u.hostname, port: Number(u.port) };
+    }
     else if (argv[i] === "--oidc") {
       const [issuer, clientId, clientSecret] = argv[++i].split(",");
       out.oidc.push({ issuer, clientId, clientSecret });
@@ -169,7 +178,7 @@ function args(argv) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const a = args(process.argv.slice(2));
-  const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev });
+  const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev, stripe: a.stripe });
   createServer(app).listen(a.port, "127.0.0.1", () => {
     console.log(`lattice server for ${app.manifest.app} on http://127.0.0.1:${a.port}`);
     console.log(`  entry ${app.manifest.entry}`);

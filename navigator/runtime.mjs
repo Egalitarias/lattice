@@ -89,7 +89,16 @@ export async function fetchApp(url, { dev = false } = {}) {
     }
     tokenEndpoint = new URL(declared.pathname, u.origin).href;
   }
-  return { url: u, manifest, wasm, api, tokenEndpoint };
+
+  let paymentsEndpoint = null;
+  if (manifest.payments?.server) {
+    const declared = new URL(manifest.payments.server);
+    if (declared.hostname !== manifest.app) {
+      throw new LoadError(`payments.server is on ${declared.hostname}, not the app's origin ${manifest.app}`);
+    }
+    paymentsEndpoint = new URL(declared.pathname, u.origin).href;
+  }
+  return { url: u, manifest, wasm, api, tokenEndpoint, paymentsEndpoint };
 }
 
 async function fetchBlob(origin, hash) {

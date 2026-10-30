@@ -5,7 +5,7 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { MAX_BODY } from "./rpc.mjs";
-import { AuthFailure } from "./auth.mjs";
+import { HostFailure } from "./prompts.mjs";
 
 const workerFile = join(dirname(fileURLToPath(import.meta.url)), "app-worker.mjs");
 
@@ -32,11 +32,12 @@ export class AppHost {
    * @param opts.rpc         RpcClient, or null if the app has no API
    * @param opts.session     SessionStore, or null
    * @param opts.auth        AuthBroker, or null
+   * @param opts.payments    PaymentBroker, or null
    * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
    *                         on a host call (the network, a person) does not count.
    */
-  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, onLog, watchdogMs, debug });
+  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, payments = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, payments, onLog, watchdogMs, debug });
   }
 
   async start() {
@@ -47,7 +48,7 @@ export class AppHost {
         origin: this.origin,
         dataDir: this.dataDir,
         sab: this.#sab,
-        hasHost: !!(this.rpc || this.session || this.auth),
+        hasHost: !!(this.rpc || this.session || this.auth || this.payments),
         debug: this.debug,
       },
       // The component gets no environment and no stdio of its own.
@@ -109,7 +110,7 @@ export class AppHost {
     try {
       r = await this.#dispatchHostCall(m);
     } catch (e) {
-      r = { ok: false, error: e instanceof AuthFailure ? e.hostError : m.kind === "rpc" ? { tag: "transport", val: `host error: ${e.message}` } : { tag: "internal", val: e.message } };
+      r = { ok: false, error: e instanceof HostFailure ? e.hostError : m.kind === "rpc" ? { tag: "transport", val: `host error: ${e.message}` } : { tag: "internal", val: e.message } };
     }
 
     const ctrl = new Int32Array(this.#sab, 0, 4);
@@ -155,6 +156,11 @@ export class AppHost {
       case "passkey":
         if (!this.auth) return denied("auth.passkey");
         return { ok: true, bytes: await this.auth.passkey(m.flow, m.options) };
+      case "payment": {
+        if (!this.payments) return denied("payments.request");
+        const r = await this.payments.request(m.orderRef);
+        return { ok: true, bytes: jsonBytes({ orderRef: r.orderRef, handler: r.handler }) };
+      }
       default:
         return { ok: false, error: { tag: "invalid-argument", val: `unknown host call ${m.kind}` } };
     }

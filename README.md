@@ -6,7 +6,7 @@ and replaces the application layer with typed, compiled, semantic parts.
 
 **Lattice Navigator** (the "Navigator" for short) is the host/client that runs Lattice apps.
 
-> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, sign-in with OIDC and passkeys, two reference apps).
+> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, sign-in with OIDC and passkeys, hosted-checkout payments, two reference apps).
 > Not production software: see "Prototype limits" below.
 
 ## Principles
@@ -94,6 +94,19 @@ cd navigator && node navigator.mjs http://127.0.0.1:8080/ --dev
 You get "Create passkey", "Sign in with a passkey", and "Sign in with 127.0.0.1:9000" in the app. The dialogs and the strip at the
 top ("tasks.localhost · Signed in as ...") are drawn by Navigator, not by the app.
 
+To try payments (signed-in users can "Upgrade to Pro" for $4.00), add a processor. The bundled one is a stand-in that speaks
+Stripe's API, so the server uses the real `stripe` library against it:
+
+```
+cd server && node dev-psp.mjs --port 9200 --webhook-url http://127.0.0.1:8080/pay/webhook      # NOT a real processor
+cd server && node server.mjs --app ../examples/tasks --port 8080 --dev \
+    --oidc http://127.0.0.1:9000,lattice-tasks \
+    --stripe-key sk_test_dev --stripe-webhook-secret whsec_dev --stripe-api http://127.0.0.1:9200
+```
+
+With real Stripe, use your own test-mode keys and drop `--stripe-api`; point a webhook endpoint at `https://<your domain>/pay/webhook`.
+**That has not been tried**: nothing here has run against the live Stripe service.
+
 What happens: Lattice Navigator asks the origin for `application/vnd.lattice.app+cbor`, validates the manifest, downloads the
 component by content hash and refuses it if the bytes differ, runs it with only the host imports the manifest grants
 (`tasks`: `log` and `rpc`), and renders the scene tree it returns. For `tasks`, every call the component makes to
@@ -103,9 +116,10 @@ Tests:
 
 ```
 cd spec && npm install && npm run validate        # schemas, fixtures, WIT parses, WIT/schema agree
-cd navigator && npm test                                # 58 end-to-end tests with the real components
+cd navigator && npm test                                # 79 end-to-end tests with the real components
 cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Edge/Chrome through the UI
 cd navigator && node test/auth-browser-check.mjs                      # sign-in in Edge/Chrome with a virtual authenticator
+cd navigator && node test/payments-browser-check.mjs                  # a full purchase in Edge/Chrome
 ```
 
 ## Prototype limits
@@ -118,6 +132,13 @@ cd navigator && node test/auth-browser-check.mjs                      # sign-in 
   recovery or credential management, and the only identity provider tried is the bundled development one (it is
   standards-shaped but not a real provider). Passkeys need Navigator's page served from the app's domain, so in this
   prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
+- Payments: hosted checkout only (the processor draws the card form on its own domain). The server code uses the
+  official `stripe` library but has only been run against the bundled stand-in, which mirrors Stripe's documentation.
+  There is no host-drawn card or wallet sheet, no recurring payments, refunds or receipts, and orders are in memory.
+  A double payment (two checkout sessions for one order both paid) is detected and logged but not refunded.
+  The server only accepts return addresses on the app's own domain, and Navigator serves its page there only for
+  `*.localhost` names, so (like passkeys) payments work for `.localhost` apps in this prototype.
+  See `spec/payments.md`.
 - RPC: no streaming, no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps
   state in memory.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
@@ -135,7 +156,8 @@ cd navigator && node test/auth-browser-check.mjs                      # sign-in 
 4. [x] Typed RPC (`rpc` import), API descriptions, and a server-backed app
 5. [ ] Browser-only Lattice Navigator (service worker + transpiled WASM)
 6. [x] Auth: OIDC and passkeys, host-drawn sign-in, session upgrade
-6b. [ ] Payments (Stripe Checkout), then analytics
+6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
+6c. [ ] Analytics, then a host-drawn payment sheet
 7. [ ] A 2D multiplayer world (WebTransport + canvas)
 
 ## License

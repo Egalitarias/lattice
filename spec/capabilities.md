@@ -39,7 +39,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 
 | Capability | Purpose | Rendering | Prompt |
 |---|---|---|---|
-| `payments.request` | Present the host payment sheet; return a single-use token bound to origin, amount, merchant. App never sees card data | host UI | each time |
+| `payments.request` | Ask the user to pay for a server-created order via a processor's hosted checkout. The app names the order; the host gets the price and URL from the server and draws the sheet. Returns a receipt, which is not proof of payment (`payments.md`) | host UI | each time |
 | `payments.mandate` | Recurring-payment consent, visible and revocable in host settings | host UI | each time |
 | `ads.slot` | Allows `AdSlot` nodes to be filled by the host | host UI | none (user sets global ad level) |
 | `analytics.event` | Emit typed events to endpoints declared in `analytics.processors` | data | none (user sets global level) |
@@ -83,4 +83,4 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 
 - Granularity of `location` (separate `location.coarse`).
 - Whether `storage.sync` belongs in core or as a host-provided component.
-- Standard shape of the `payments.request` token and handler interface (next spec document).
+- A host-drawn card or wallet sheet and the token it would produce (see `payments.md`, which specifies hosted checkout only).

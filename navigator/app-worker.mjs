@@ -9,7 +9,7 @@
 //   worker -> main  { id, ok, value | payload }  its result
 //   worker -> main  { type: "log", level, message }
 //   worker -> main  { type: "host", kind, ...payload }  then block until main fills the shared buffer
-//                   (kind: rpc | session-current | session-sign-out | oidc | passkey)
+//                   (kind: rpc | session-current | session-sign-out | oidc | passkey | payment)
 
 import { parentPort, workerData } from "node:worker_threads";
 import { readFileSync } from "node:fs";
@@ -22,7 +22,7 @@ const { entryJs, granted, origin, dataDir, sab, hasHost, debug } = workerData;
 const ctrl = new Int32Array(sab, 0, 4); // [0] state (0 waiting, 1 ready), [1] kind (1 ok, 2 error), [2] length
 const shared = new Uint8Array(sab, 16); // bytes of the main thread's reply
 // Calls that wait on a person get minutes, not seconds. The main thread pauses its watchdog meanwhile.
-const INTERACTIVE = new Set(["oidc", "passkey", "session-sign-out"]);
+const INTERACTIVE = new Set(["oidc", "passkey", "payment", "session-sign-out"]);
 const WAIT_MS = 30_000;
 const INTERACTIVE_WAIT_MS = 6 * 60_000;
 

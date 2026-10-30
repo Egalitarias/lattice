@@ -14,6 +14,8 @@ import { fetchApp, prepareComponent, LoadError } from "./runtime.mjs";
 import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
 import { RpcClient, SessionStore } from "./rpc.mjs";
 import { AuthBroker } from "./auth.mjs";
+import { PaymentBroker } from "./payments.mjs";
+import { Prompts } from "./prompts.mjs";
 import { CAPABILITY_IMPORTS } from "./host.mjs";
 import { SceneStore, SceneError, toArgs, argsObject } from "./scene.mjs";
 
@@ -256,12 +258,12 @@ const CALLBACK_PAGE = (message) =>
   `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lattice Navigator</title><body><main><h1>Lattice Navigator</h1><p>${message}</p></main>`;
 
 export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs }) {
-  const { url: appUrl, manifest, wasm, api, tokenEndpoint } = await fetchApp(url, { dev });
+  const { url: appUrl, manifest, wasm, api, tokenEndpoint, paymentsEndpoint } = await fetchApp(url, { dev });
   const domain = manifest.app;
   const entryJs = await prepareComponent({ manifest, wasm, cacheDir });
 
   const granted = new Set([...(manifest.capabilities?.requires ?? []), ...(manifest.capabilities?.optional ?? [])]);
-  const wantsAuth = ["session", "auth.oidc", "auth.passkey"].some((c) => granted.has(c));
+  const wantsAuth = ["session", "auth.oidc", "auth.passkey", "payments.request"].some((c) => granted.has(c));
 
   // Browser windows connected to this Navigator.
   const clients = new Set();
@@ -275,7 +277,12 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
   const uiOrigin = () => `http://${uiHost}:${boundPort}`;
 
   const sessionStore = wantsAuth ? new SessionStore(dataDir, domain) : null;
-  const auth = sessionStore ? new AuthBroker({ manifest, tokenEndpoint, session: sessionStore, uiOrigin, broadcast, dev, timeoutMs: authTimeoutMs }) : null;
+  // Everything the user is asked (sign-in, payment) goes through one prompt manager.
+  const prompts = new Prompts({ broadcast, app: { name: manifest.name ?? domain, domain }, timeoutMs: authTimeoutMs });
+  const auth = sessionStore ? new AuthBroker({ manifest, tokenEndpoint, session: sessionStore, uiOrigin, prompts, dev }) : null;
+  const payments = sessionStore && manifest.payments
+    ? new PaymentBroker({ manifest, endpoint: paymentsEndpoint, session: sessionStore, uiOrigin, prompts, dev, timeoutMs: authTimeoutMs })
+    : null;
   const rpc = api
     ? new RpcClient({
         endpoint: api.endpoint,
@@ -286,7 +293,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
       })
     : null;
 
-  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, onLog: log, watchdogMs });
+  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, payments, onLog: log, watchdogMs });
   try {
     await host.start();
   } catch (e) {
@@ -317,7 +324,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     return {
       app: { name: manifest.name ?? domain, domain },
       session: i ? { signedIn: i.signedIn, name: i.name ?? null } : null,
-      auth: auth ? auth.list() : [],
+      prompts: prompts.list(),
     };
   };
   const snap = (focus) => ({ ...session.snapshot(focus), chrome: chrome() });
@@ -359,6 +366,14 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
       // redirect; the single-use `state` value is what binds this request to one pending sign-in.
       if (req.method === "GET" && u.pathname === "/_navigator/auth/callback" && auth) {
         const r = auth.callback(u.searchParams);
+        res.writeHead(r.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
+        return void res.end(CALLBACK_PAGE(r.message));
+      }
+
+      // The payment processor sends the user's browser back here (success_url / cancel_url, which the host
+      // itself chose). As with sign-in, only the single-use `state` binds it to a pending request.
+      if (req.method === "GET" && (u.pathname === "/_navigator/payment/return" || u.pathname === "/_navigator/payment/cancel") && payments) {
+        const r = payments.callback(u.pathname.endsWith("/return") ? "return" : "cancel", u.searchParams);
         res.writeHead(r.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
         return void res.end(CALLBACK_PAGE(r.message));
       }
@@ -407,9 +422,10 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
           if (!auth.finishPasskey(body.id, body)) throw new HttpError(404, "no such sign-in request");
           return ok(res);
         }
-        if (u.pathname === "/_navigator/auth/cancel" && auth) {
+        // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
+        if (u.pathname === "/_navigator/prompt/cancel" || u.pathname === "/_navigator/auth/cancel") {
           if (typeof body.id !== "string") throw new HttpError(400, "bad id");
-          auth.cancel(body.id);
+          prompts.cancel(body.id);
           return ok(res);
         }
 
@@ -453,8 +469,10 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     session,
     host,
     auth,
+    payments,
+    prompts,
     sessionStore,
-    close: () => new Promise((done) => { auth?.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }),
+    close: () => new Promise((done) => { prompts.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }),
   };
 }
 

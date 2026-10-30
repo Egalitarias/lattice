@@ -82,3 +82,4 @@ dialog#auth { border: 1px solid var(--line); border-radius: var(--radius); backg
 dialog#auth::backdrop { background: rgb(0 0 0 / .45); }
 dialog#auth h2 { margin: 0 0 var(--s-sm); }
 dialog#auth p { margin: 0 0 var(--s-md); }
+dialog#auth .pay-lines { margin: 0 0 var(--s-sm); padding-left: 1.25rem; }

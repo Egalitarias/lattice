@@ -204,7 +204,7 @@
       ]
     },
     "profile": {
-      "description": "Who the caller is. Signed-out callers are anonymous.",
+      "description": "Who the caller is, and whether they have Pro. Signed-out callers are anonymous.",
       "effect": "read",
       "request": {
         "type": "object",
@@ -214,7 +214,8 @@
         "type": "object",
         "required": [
           "signed_in",
-          "name"
+          "name",
+          "pro"
         ],
         "additionalProperties": false,
         "properties": {
@@ -224,6 +225,9 @@
           "name": {
             "type": "string",
             "maxLength": 80
+          },
+          "pro": {
+            "type": "boolean"
           }
         }
       }
@@ -355,6 +359,91 @@
         {
           "code": "passkey_failed",
           "description": "The passkey could not be verified."
+        }
+      ]
+    },
+    "create_order": {
+      "description": "Create an order for Tasks Pro. The server prices it; the app then asks the host to take payment.",
+      "effect": "write",
+      "request": {
+        "type": "object",
+        "required": [
+          "sku"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "sku": {
+            "type": "string",
+            "enum": [
+              "pro"
+            ]
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "order_ref"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "order_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "errors": [
+        {
+          "code": "already_pro",
+          "description": "The account already has Pro."
+        },
+        {
+          "code": "payments_unavailable",
+          "description": "This server is not configured to take payments."
+        }
+      ]
+    },
+    "order_status": {
+      "description": "Whether an order has been paid, as the server knows it (from the processor's signed webhook).",
+      "effect": "read",
+      "request": {
+        "type": "object",
+        "required": [
+          "order_ref"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "order_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "created",
+              "pending",
+              "paid",
+              "failed",
+              "expired"
+            ]
+          }
+        }
+      },
+      "errors": [
+        {
+          "code": "order_not_found"
         }
       ]
     }

@@ -14,6 +14,7 @@ export const CAPABILITY_IMPORTS = {
   "lattice:app/rpc": ["net.origin", "net.realtime"],
   "lattice:app/session": ["session"],
   "lattice:app/auth": ["auth.oidc", "auth.passkey"],
+  "lattice:app/payments": ["payments.request"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
@@ -117,6 +118,15 @@ export function hostImports({ granted, origin, dataDir, onLog, hostCall }) {
       passkeyAssert(options) {
         need("auth.passkey");
         return unwrap(hostCall("passkey", { flow: "assert", options }));
+      },
+    };
+  }
+
+  if (hostCall && granted.has("payments.request")) {
+    imports["lattice:app/payments"] = {
+      request(orderRef) {
+        const r = json(unwrap(hostCall("payment", { orderRef })));
+        return { orderRef: r.orderRef, handler: r.handler };
       },
     };
   }

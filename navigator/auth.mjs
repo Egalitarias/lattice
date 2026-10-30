@@ -6,74 +6,42 @@
 
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import { applySessionHeaders } from "./rpc.mjs";
+import { Prompts, HostFailure, fail, DEFAULT_TIMEOUT_MS } from "./prompts.mjs";
 
-const INTERACTION_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_OPTIONS = 16 * 1024;
 const MAX_RESPONSE = 64 * 1024;
 const isLoopbackHost = (h) => h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h.endsWith(".localhost");
 
 /** A failure the app may see: carries a WIT `host-error` value. */
-export class AuthFailure extends Error {
-  constructor(tag, val) {
-    super(val ? `${tag}: ${val}` : tag);
-    this.hostError = val === undefined ? { tag } : { tag, val };
-  }
-}
-const fail = (tag, val) => new AuthFailure(tag, val);
+export const AuthFailure = HostFailure;
 const rand = () => randomBytes(32).toString("base64url");
 
 export class AuthBroker {
-  #prompts = new Map(); // id -> { prompt, state?, issuer?, resolve, reject, timer }
-
   /**
    * @param manifest      the verified manifest
    * @param tokenEndpoint absolute URL (already mapped to the address the manifest was fetched from) or null
    * @param session       SessionStore
    * @param uiOrigin      () => origin the user's browser is on, e.g. http://tasks.localhost:7070
-   * @param broadcast     (message) => void, to every open Navigator window
+   * @param prompts       shared Prompts (or pass `broadcast` and one is made)
    */
-  constructor({ manifest, tokenEndpoint, session, uiOrigin, broadcast, dev = false, timeoutMs = INTERACTION_TIMEOUT_MS, fetchImpl = fetch }) {
-    Object.assign(this, { manifest, tokenEndpoint, session, uiOrigin, broadcast, dev, timeoutMs, fetchImpl });
-  }
-
-  get #app() {
-    return { name: this.manifest.name ?? this.manifest.app, domain: this.manifest.app };
+  constructor({ manifest, tokenEndpoint, session, uiOrigin, prompts, broadcast, dev = false, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = fetch }) {
+    const app = { name: manifest.name ?? manifest.app, domain: manifest.app };
+    Object.assign(this, { manifest, tokenEndpoint, session, uiOrigin, dev, fetchImpl });
+    this.prompts = prompts ?? new Prompts({ broadcast, app, timeoutMs });
   }
 
   /** Public view of the pending interactions, for a window that connects mid-flow. */
   list() {
-    return [...this.#prompts.values()].map((p) => p.prompt);
-  }
-
-  // ---- Interactions --------------------------------------------------------------------------
-
-  #interact(prompt, extra = {}) {
-    const id = randomUUID();
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.#settle(id, "reject", fail("cancelled")), this.timeoutMs);
-      const full = { id, app: this.#app, ...prompt };
-      this.#prompts.set(id, { prompt: full, resolve, reject, timer, ...extra });
-      this.broadcast({ kind: "auth", prompt: full });
-    });
-  }
-
-  #settle(id, how, value) {
-    const p = this.#prompts.get(id);
-    if (!p) return false;
-    this.#prompts.delete(id);
-    clearTimeout(p.timer);
-    this.broadcast({ kind: "auth-end", id });
-    p[how](value);
-    return true;
+    return this.prompts.list();
   }
 
   /** The user pressed Cancel in the host dialog. */
   cancel(id) {
-    return this.#settle(id, "reject", fail("cancelled"));
+    return this.prompts.cancel(id);
   }
 
   dispose() {
-    for (const id of [...this.#prompts.keys()]) this.#settle(id, "reject", fail("cancelled"));
+    this.prompts.dispose();
   }
 
   // ---- OIDC ----------------------------------------------------------------------------------
@@ -135,7 +103,7 @@ export class AuthBroker {
       code_challenge_method: "S256",
     })) url.searchParams.set(k, v);
 
-    const code = await this.#interact({ flow: "oidc", issuerHost: new URL(issuer).host, url: url.href }, { state, issuer });
+    const code = await this.prompts.ask({ flow: "oidc", issuerHost: new URL(issuer).host, url: url.href }, { state, issuer });
 
     let res;
     try {
@@ -167,25 +135,25 @@ export class AuthBroker {
       if (params.getAll(name).length > 1) return { ok: false, message: "This sign-in link is not valid. Return to the app and try again." };
     }
     const state = params.get("state");
-    const entry = [...this.#prompts.values()].find((p) => p.state && p.state === state);
+    const entry = this.prompts.byState("oidc", state);
     if (!entry) return { ok: false, message: "This sign-in link is not valid or has expired. Return to the app and try again." };
     const id = entry.prompt.id;
 
     const iss = params.get("iss"); // RFC 9207: reject a response from a different issuer
     if (iss && iss !== entry.issuer) {
-      this.#settle(id, "reject", fail("invalid-argument", "the response came from a different identity provider"));
+      this.prompts.settle(id, "reject", fail("invalid-argument", "the response came from a different identity provider"));
       return { ok: false, message: "Sign-in failed." };
     }
     if (params.get("error")) {
-      this.#settle(id, "reject", fail("cancelled"));
+      this.prompts.settle(id, "reject", fail("cancelled"));
       return { ok: false, message: "Sign-in was cancelled." };
     }
     const code = params.get("code");
     if (!code || code.length > 2048) {
-      this.#settle(id, "reject", fail("invalid-argument", "the identity provider returned no code"));
+      this.prompts.settle(id, "reject", fail("invalid-argument", "the identity provider returned no code"));
       return { ok: false, message: "Sign-in failed." };
     }
-    this.#settle(id, "resolve", code);
+    this.prompts.settle(id, "resolve", code);
     return { ok: true, message: "Sign-in complete. You can close this tab and return to the app." };
   }
 
@@ -216,17 +184,17 @@ export class AuthBroker {
     if (flow === "assert") options.rpId = domain;
     delete options.extensions; // the app does not get to enable authenticator extensions
 
-    const response = await this.#interact({ flow: flow === "create" ? "passkey-create" : "passkey-assert", options });
+    const response = await this.prompts.ask({ flow: flow === "create" ? "passkey-create" : "passkey-assert", options });
     return Buffer.from(response, "utf8");
   }
 
   /** The window finished (or failed) a passkey ceremony. */
   finishPasskey(id, body) {
-    const entry = this.#prompts.get(id);
+    const entry = this.prompts.get(id);
     if (!entry || !entry.prompt.flow.startsWith("passkey")) return false;
     if (!body || body.ok !== true) {
       const name = String(body?.error ?? "");
-      return this.#settle(id, "reject", name === "NotAllowedError" || name === "AbortError" ? fail("cancelled") : fail("unavailable", name.slice(0, 120) || "the passkey operation failed"));
+      return this.prompts.settle(id, "reject", name === "NotAllowedError" || name === "AbortError" ? fail("cancelled") : fail("unavailable", name.slice(0, 120) || "the passkey operation failed"));
     }
     let valid = typeof body.response === "string" && body.response.length <= MAX_RESPONSE;
     if (valid) {
@@ -237,8 +205,8 @@ export class AuthBroker {
         valid = false;
       }
     }
-    if (!valid) return this.#settle(id, "reject", fail("invalid-argument", "the passkey response was malformed"));
-    return this.#settle(id, "resolve", body.response);
+    if (!valid) return this.prompts.settle(id, "reject", fail("invalid-argument", "the passkey response was malformed"));
+    return this.prompts.settle(id, "resolve", body.response);
   }
 
   // ---- Sign out ------------------------------------------------------------------------------

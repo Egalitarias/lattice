@@ -183,7 +183,7 @@ test("the host stays responsive while a component is blocked on a slow RPC", asy
   // A tasks origin whose add_task takes a while.
   const handlers = completeHandlers({
     list_tasks: async () => ({ tasks: [] }),
-    profile: async () => ({ signed_in: false, name: "" }),
+    profile: async () => ({ signed_in: false, name: "", pro: false }),
     add_task: async ({ title }) => { await sleep(1500); return { task: { id: 1, title, done: false } }; },
     set_done: async () => { throw new ApiError("task_not_found", "no"); },
     delete_task: async () => { throw new ApiError("task_not_found", "no"); },

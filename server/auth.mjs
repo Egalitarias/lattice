@@ -298,7 +298,7 @@ export function createAuth({
       }
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return reply(res, 400, { code: "invalid_request", message: "bad JSON" }); }
-      if (!body || typeof body !== "object") return reply(res, 400, { code: "invalid_request", message: "bad JSON" });
+      if (!body || typeof body !== "object" || Array.isArray(body)) return reply(res, 400, { code: "invalid_request", message: "bad JSON" });
 
       if (body.grant === "oidc") return await oidcSignIn(body, res);
       if (body.grant === "revoke") {
