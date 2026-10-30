@@ -70,7 +70,8 @@
       "properties": {
         "url": { "type": "string", "format": "uri", "pattern": "^https://" },
         "schema": { "description": "Hash of the API description (api.schema.json), fetched from /.lattice/blob/{hash}. See rpc.md.", "$ref": "#/$defs/hash" },
-        "stream": { "description": "Reserved for a WebTransport endpoint carrying the same topics as {api.url}/_topics/{topic} (see rpc.md). Not used by v0.1 hosts.", "type": "string", "pattern": "^https://" }
+        "stream": { "description": "WebTransport endpoint carrying the same topics as {api.url}/_topics/{topic} (see rpc.md, Topics over WebTransport). Must be on the app's domain. Optional: hosts fall back to streaming HTTPS.", "type": "string", "pattern": "^https://" },
+        "stream_cert_hash": { "description": "DEVELOPMENT ONLY. SHA-256 of a self-signed certificate the stream endpoint presents. Hosts honour it only for loopback development origins and ignore it everywhere else.", "$ref": "#/$defs/hash" }
       }
     },
 

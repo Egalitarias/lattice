@@ -44,6 +44,11 @@ component or dependency (it is hash-verified and confined to a network-less Work
 origin, which could serve a modified host. The native Navigator, installed independently of the origin, is the
 stronger boundary. Apps should treat the two as different trust levels.
 
+## Live updates
+
+Topics (spec/rpc.md) use the browser's own `WebTransport` when the manifest offers `api.stream`, otherwise a streaming
+`fetch`. Both are allowed by the page's `connect-src 'self' https:`; WebTransport needs a UDP path to the origin.
+
 ## Limits
 
 Non-loopback use needs TLS, as with any passkey or payment flow. Component storage uses `localStorage` (about 5 MB).

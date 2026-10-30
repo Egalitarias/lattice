@@ -82,12 +82,27 @@ An API description may declare `topics`. Each is a named stream of messages from
 the topic's `message` schema. The app calls `rpc.subscribe(topic)` (capability `net.realtime`) and receives
 `host-event.stream-message { topic, payload }` through `on-event`; `rpc.unsubscribe(topic)` stops it.
 
-**Wire (v0.1, streaming HTTPS):** `GET {api.url}/_topics/{topic}` with the same `Lattice-Api` and `Lattice-Session`
+Two transports carry the same frames; a host uses WebTransport when the manifest offers it and falls back to
+streaming HTTPS when it cannot connect (blocked UDP, no QUIC, a failed handshake), retrying WebTransport after a minute.
+
+**Wire, streaming HTTPS:** `GET {api.url}/_topics/{topic}` with the same `Lattice-Api` and `Lattice-Session`
 headers as a call. A `200` has `Content-Type: application/x-ndjson`; the body is one JSON object per line,
 `{"seq": <integer>, "payload": <message>}`, with an empty line as a heartbeat (about every 15 s). Errors before the
-stream starts use the RPC error body. Only the JSON data model is carried, as for calls. This framing is
-transport-neutral: a WebTransport stream carrying the same lines is the intended upgrade, advertised by
-`api.stream`; it is not implemented.
+stream starts use the RPC error body. Only the JSON data model is carried, as for calls.
+
+**Wire, WebTransport (`api.stream`):** the manifest's `api.stream` is an `https://` URL on the app's own domain.
+The client opens one WebTransport session (HTTP/3 over QUIC) and one bidirectional stream per subscription. It
+writes a single line `{"topic": "...", "api": "<description hash>", "session": "<token>"}` (at most 4 KiB, and the
+session token travels in the encrypted stream rather than a URL), and keeps its side of the stream open: closing it
+ends the subscription. The server replies on the same stream with the frames above, or, if it refuses, with one line
+`{"error": {"code": "...", "message": "..."}}` (the RPC error codes) and closes. Codes other than `rate_limited` and
+`internal` are final; the client does not retry them. One session multiplexes every topic, so a slow topic cannot
+stall another, and a server may cap streams per session (the prototype allows 32) and sessions in total.
+
+The certificate must chain to a trusted root. For development only, a host on a loopback origin honours
+`api.stream_cert_hash`, the SHA-256 of a self-signed certificate valid for at most 14 days (the limit browsers
+enforce for pinned certificates); every other host ignores it. A pinned connection whose certificate does not match
+fails, and the host falls back to HTTPS.
 
 **Host duties.** The host refuses topics the description does not declare, allows at most 8 subscriptions per app,
 validates each message (dropping and counting any that fail), caps a line at 1 MiB, re-connects with exponential
@@ -102,7 +117,8 @@ queued). A message goes only to subscribers allowed to see it.
 
 ## Not specified yet
 
-- WebTransport (datagrams, multiple streams), resumable streams, and per-topic parameters.
+- WebTransport datagrams (unreliable, unordered updates for fast-moving state), resumable streams, per-topic
+  parameters, and sending from the client over a stream (calls remain RPC).
 - Cross-origin API endpoints and their capability.
 - Byte strings and non-string keys in bodies (the validated data model is JSON).
 - Compression, request batching, and pagination conventions.

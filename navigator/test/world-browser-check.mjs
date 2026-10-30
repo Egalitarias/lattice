@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadApp, createServer, loadNavigator } from "../../server/server.mjs";
+import { loadApp, createServer, loadNavigator, attachWebTransport } from "../../server/server.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const exe = [process.env.BROWSER, "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].filter(Boolean).find((p) => existsSync(p));
@@ -21,6 +21,7 @@ let failed = 0;
 const check = (ok, label, detail = "") => { console.log(`${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : "  -> " + detail}`); if (!ok) failed++; };
 
 const app = await loadApp({ appDir: resolve(here, "..", "..", "examples", "world"), dev: true, log: () => {} });
+const wt = await attachWebTransport(app, { dev: true, log: () => {} }); // null when the optional packages are missing
 const origin = createServer({ ...app, navigator: navigatorDist });
 await new Promise((r) => origin.listen(0, "127.0.0.1", r));
 const url = `http://world.localhost:${origin.address().port}/`;
@@ -79,11 +80,29 @@ try {
   check(moved, "a step is applied by the server and comes back over the topic to the one who took it");
   const after = await b.js("document.body.innerText.match(/You are (.*?) at column/)?.[1] ?? ''");
   check(await a.until(`document.body.innerText.includes(${JSON.stringify(after)} ) || document.body.innerText.includes('2 online')`), "the first browser still shows both players");
+  if (wt) {
+    check(await a.until("latticeDebug.controller.host.stream.transports.get('world') === 'webtransport'", 8000), "the first browser receives the topic over real WebTransport (HTTP/3), pinned to the development certificate");
+    check(await b.until("latticeDebug.controller.host.stream.transports.get('world') === 'webtransport'", 8000), "and so does the second");
+  } else console.log("SKIP  WebTransport packages are not installed; topics use streaming HTTPS");
+  // The canvas: painted with more than one colour, labelled, and driven from the keyboard.
+  const pixels = await a.js(`(() => { const c = document.querySelector('canvas.scene-canvas'); if (!c) return 0; const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; const seen = new Set(); for (let i = 0; i < d.length; i += 4 * 97) seen.add(d[i] + ',' + d[i + 1] + ',' + d[i + 2]); return seen.size; })()`);
+  check(pixels >= 3, "the world is painted on a canvas (several distinct colours)", String(pixels));
+  check(await a.js("document.querySelector('canvas.scene-canvas').getAttribute('aria-label') === 'The world' && document.querySelector('canvas.scene-canvas').tabIndex === 0"), "the canvas has an accessible name and is keyboard-focusable");
+  const here = () => b.js("document.body.innerText.match(/column (\d+), row (\d+)/)?.[0] ?? ''");
+  const start = await here();
+  let keyed = false;
+  for (const key of ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"]) {
+    await b.js(`(() => { const c = document.querySelector('canvas.scene-canvas'); c.focus(); c.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true })); })()`);
+    if (await b.until(`document.body.innerText.match(/column (\d+), row (\d+)/)?.[0] !== ${JSON.stringify(start)}`, 1500)) { keyed = true; break; }
+  }
+  check(keyed, "an arrow key on the focused canvas moves the player");
+  check(await b.js("document.activeElement === document.querySelector('canvas.scene-canvas')"), "and the canvas keeps keyboard focus through the updates");
   check(a.problems.length === 0 && b.problems.length === 0, "no console errors or CSP violations in either browser", [...a.problems, ...b.problems].join(" | ").slice(0, 300));
 } finally {
   await a.stop();
   await b.stop();
   app.topics.close();
+  wt?.close();
   origin.closeAllConnections?.();
   origin.close();
 }

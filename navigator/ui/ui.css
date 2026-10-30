@@ -70,6 +70,9 @@ caption { text-align: left; font-weight: 600; padding-bottom: var(--s-xs); }
 th, td { border-bottom: 1px solid var(--line); padding: var(--s-xs) var(--s-sm); text-align: start; }
 [data-cell-align="end"] { text-align: end; } [data-cell-align="center"] { text-align: center; }
 .placeholder { border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--s-sm); color: var(--muted); }
+.canvas-wrap { display: block; max-width: 100%; }
+.scene-canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius); touch-action: none; }
+.scene-canvas:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 img, video { max-width: 100%; }
 

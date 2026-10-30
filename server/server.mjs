@@ -19,6 +19,7 @@
 // Usage: node server.mjs --app ../examples/tasks [--port 8080] [--domain tasks.localhost]
 //                        [--oidc <issuer>,<client_id>[,<client_secret>]]... [--dev]
 //                        [--navigator-dist <dir> | --no-navigator]
+//                        [--no-webtransport] [--wt-port n] [--wt-cert pem --wt-key pem]
 //                        [--stripe-key sk_test_...] [--stripe-webhook-secret whsec_...] [--stripe-api http://127.0.0.1:9200]
 
 import http from "node:http";
@@ -31,6 +32,7 @@ import addFormats from "ajv-formats";
 import { encode } from "../shared/cbor.mjs";
 import { createRpc } from "./rpc.mjs";
 import { createTopics } from "./topics.mjs";
+import { startWebTransport, loadCertFiles } from "./webtransport.mjs";
 
 export const MANIFEST_TYPE = "application/vnd.lattice.app+cbor";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -127,6 +129,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   let rpc = null;
+  let apiDescription = null;
   let topics = null;
   let rpcPath = null;
   let http = {};
@@ -134,7 +137,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   const apiFile = join(appDir, "api.json");
   if (existsSync(apiFile)) {
     const apiBytes = readFileSync(apiFile);
-    const apiDescription = JSON.parse(apiBytes);
+    apiDescription = JSON.parse(apiBytes);
     schemaValidator("api.schema.json")(apiDescription, "api.json");
     const apiHash = hashOf(apiBytes);
     blobs.set(apiHash, { bytes: apiBytes, type: "application/json" });
@@ -152,7 +155,20 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath, http, impl, dev, topics };
+  return { manifest, blobs, rpc, rpcPath, http, impl, dev, topics, apiDescription };
+}
+
+/**
+ * Offer the app's topics over WebTransport too, when the optional packages are installed: starts an HTTP/3 listener and
+ * advertises it in the manifest (call before createServer, which freezes the manifest). Returns the listener or null.
+ */
+export async function attachWebTransport(app, { port = 0, cert, key, dev = false, log = console.error } = {}) {
+  if (!app.topics || !app.manifest.api || !Object.keys(app.apiDescription?.topics ?? {}).length) return null;
+  const wt = await startWebTransport({ topics: app.topics, port, publicHost: app.manifest.app, cert, key, dev, log });
+  if (!wt) return null;
+  app.manifest.api = { ...app.manifest.api, stream: wt.url, ...(wt.certHash ? { stream_cert_hash: wt.certHash } : {}) };
+  schemaValidator("manifest.schema.json")(app.manifest, "manifest");
+  return wt;
 }
 
 const FALLBACK = (name) => `<!doctype html>
@@ -245,7 +261,7 @@ export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {},
 }
 
 function args(argv) {
-  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false, stripe: null, navigatorDist: undefined, noNavigator: false };
+  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false, stripe: null, navigatorDist: undefined, noNavigator: false, wt: true, wtPort: 0, wtCert: undefined, wtKey: undefined };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--port") out.port = Number(argv[++i]);
     else if (argv[i] === "--app") out.app = resolve(argv[++i]);
@@ -253,6 +269,10 @@ function args(argv) {
     else if (argv[i] === "--dev") out.dev = true;
     else if (argv[i] === "--navigator-dist") out.navigatorDist = resolve(argv[++i]);
     else if (argv[i] === "--no-navigator") out.noNavigator = true;
+    else if (argv[i] === "--no-webtransport") out.wt = false;
+    else if (argv[i] === "--wt-port") out.wtPort = Number(argv[++i]);
+    else if (argv[i] === "--wt-cert") out.wtCert = resolve(argv[++i]);
+    else if (argv[i] === "--wt-key") out.wtKey = resolve(argv[++i]);
     else if (argv[i] === "--stripe-key") (out.stripe ??= {}).secretKey = argv[++i];
     else if (argv[i] === "--stripe-webhook-secret") (out.stripe ??= {}).webhookSecret = argv[++i];
     else if (argv[i] === "--stripe-api") {
@@ -272,10 +292,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   const a = args(process.argv.slice(2));
   const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev, stripe: a.stripe });
   const navigator = a.noNavigator ? null : loadNavigator(a.navigatorDist);
+  // Topics over WebTransport as well, if the app has any and the optional packages are installed. A real deployment
+  // supplies a certificate; --dev makes a throwaway one that the manifest tells development hosts how to pin.
+  let wt = null;
+  if (a.wt && (a.dev || (a.wtCert && a.wtKey))) {
+    wt = await attachWebTransport(app, { port: a.wtPort, dev: a.dev, ...(a.wtCert ? loadCertFiles(a.wtCert, a.wtKey) : {}) });
+  }
   createServer({ ...app, navigator }).listen(a.port, "127.0.0.1", () => {
     console.log(`lattice server for ${app.manifest.app} on http://127.0.0.1:${a.port}`);
     console.log(`  entry ${app.manifest.entry}`);
     if (app.manifest.api) console.log(`  api   ${app.manifest.api.schema} at ${app.rpcPath}/<method>`);
+    if (Object.keys(app.apiDescription?.topics ?? {}).length) console.log(wt ? `  webtransport: ${wt.url} (udp ${wt.port})` : "  webtransport: not offered (topics use streaming HTTPS)");
     console.log(navigator ? "  browser navigator: serving it to browsers" : "  browser navigator: not built (run: cd navigator && npm run build:browser)");
   });
 }

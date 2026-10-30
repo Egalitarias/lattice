@@ -194,9 +194,12 @@ function shell(n) {
       return { el: h("div", { class: "placeholder" }, p.label) };
     }
     case "canvas": {
-      const el = h("div", { class: "placeholder", role: "img", "aria-label": p.label });
-      el.append(h("span", {}, p.description));
-      return { el };
+      if (!p.drawing) {
+        const el = h("div", { class: "placeholder", role: "img", "aria-label": p.label });
+        el.append(h("span", {}, p.description));
+        return { el };
+      }
+      return canvasEl(n);
     }
     case "ad-slot":
       // Ads are host-rendered. This prototype has no ad network, so it shows the mandatory disclosure only.
@@ -222,6 +225,89 @@ function decorate(el, n) {
   }
 }
 
+// ---- Canvas -----------------------------------------------------------------------------------
+// The app supplies a display list (data); this paints it with Canvas 2D. Tones are resolved against the current theme, so
+// the app cannot choose a colour, only a meaning. Input goes back as a pointer position or one of a few keys.
+
+const TONE_VAR = { default: "--fg", muted: "--muted", accent: "--accent", positive: "--positive", caution: "--caution", critical: "--critical" };
+
+function paint(canvas, d) {
+  const dpr = Math.min(globalThis.devicePixelRatio || 1, 3);
+  const cssW = canvas.clientWidth || d.width;
+  const scale = cssW / d.width;
+  canvas.width = Math.max(1, Math.round(d.width * scale * dpr));
+  canvas.height = Math.max(1, Math.round(d.height * scale * dpr));
+  const ctx = canvas.getContext("2d");
+  const style = getComputedStyle(canvas);
+  const colour = (tone) => style.getPropertyValue(TONE_VAR[tone ?? "default"] ?? "--fg").trim() || "#888";
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  ctx.fillStyle = style.getPropertyValue("--surface").trim() || "#eee";
+  ctx.fillRect(0, 0, d.width, d.height);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (const { tag, val: v } of d.ops) {
+    const c = colour(v.tone);
+    ctx.fillStyle = ctx.strokeStyle = c;
+    if (tag === "rect") {
+      if (v.outline) { ctx.lineWidth = 1; ctx.strokeRect(v.x, v.y, v.w, v.h); } else ctx.fillRect(v.x, v.y, v.w, v.h);
+    } else if (tag === "ellipse") {
+      ctx.beginPath();
+      ctx.ellipse(v.cx, v.cy, Math.abs(v.rx), Math.abs(v.ry), 0, 0, Math.PI * 2);
+      if (v.outline) { ctx.lineWidth = 1; ctx.stroke(); } else ctx.fill();
+    } else if (tag === "line") {
+      ctx.lineWidth = v.width;
+      ctx.beginPath();
+      ctx.moveTo(v.x1, v.y1);
+      ctx.lineTo(v.x2, v.y2);
+      ctx.stroke();
+    } else if (tag === "text") {
+      ctx.font = `${v.size}px system-ui, sans-serif`;
+      ctx.fillText(v.text, v.x, v.y);
+    }
+  }
+}
+
+const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
+
+function canvasEl(n) {
+  let p = n.props;
+  const wrap = h("div", { class: "canvas-wrap" });
+  const canvas = h("canvas", { class: "scene-canvas", "aria-label": p.label, role: p.onInput ? "application" : "img", "aria-roledescription": p.onInput ? "interactive drawing" : undefined });
+  canvas.style.aspectRatio = `${p.drawing.width} / ${p.drawing.height}`;
+  const descId = `cv${n.id}-d`;
+  canvas.setAttribute("aria-describedby", descId);
+  wrap.append(canvas, h("span", { class: "sr-only", id: descId }, p.description));
+  const desc = wrap.querySelector(".sr-only");
+  const draw = () => paint(canvas, p.drawing);
+  requestAnimationFrame(draw);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(draw).observe(canvas);
+  matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", draw);
+  if (p.onInput) {
+    canvas.tabIndex = 0;
+    canvas.addEventListener("pointerdown", (e) => {
+      const r = canvas.getBoundingClientRect();
+      const x = ((e.clientX - r.left) / r.width) * p.drawing.width;
+      const y = ((e.clientY - r.top) / r.height) * p.drawing.height;
+      canvas.focus();
+      act(n.id, "input", { kind: "pointer", x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 });
+    });
+    canvas.addEventListener("keydown", (e) => {
+      if (!ARROWS.has(e.key) || e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      act(n.id, "input", { kind: "key", key: e.key });
+    });
+  }
+  // A new picture repaints the same element, so keyboard focus survives the update.
+  const update = (next) => {
+    p = next.props;
+    canvas.setAttribute("aria-label", p.label);
+    canvas.style.aspectRatio = `${p.drawing.width} / ${p.drawing.height}`;
+    desc.textContent = p.description;
+    draw();
+  };
+  return { el: wrap, update };
+}
+
 // ---- Reconcile --------------------------------------------------------------------------------
 
 const CONTAINERS = new Set(["stack", "grid", "scroll", "layer", "region", "item-list", "form"]);
@@ -235,10 +321,14 @@ function reconcile(parent, nodes, seen) {
   const desired = nodes.map((n) => {
     seen.add(n.id);
     let entry = live.get(n.id);
-    if (!entry || entry.rev !== n.rev || entry.type !== n.type) {
-      const { el } = shell(n);
+    const reusable = entry && entry.update && entry.type === n.type && entry.input === !!n.props.onInput && n.props.drawing;
+    if (entry && entry.rev !== n.rev && reusable) {
+      entry.update(n);
+      entry.rev = n.rev;
+    } else if (!entry || entry.rev !== n.rev || entry.type !== n.type) {
+      const { el, update } = shell(n);
       decorate(el, n);
-      entry = { el, rev: n.rev, type: n.type };
+      entry = { el, rev: n.rev, type: n.type, update, input: !!n.props.onInput };
       live.set(n.id, entry);
     }
     if (CONTAINERS.has(n.type)) reconcile(entry.el, n.children, seen);

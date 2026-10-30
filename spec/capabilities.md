@@ -22,7 +22,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 | `net.realtime` | WebTransport streams and datagrams to declared endpoints | data | none |
 | `storage.local` | Origin-partitioned key-value and blob storage on the device | data | none |
 | `storage.sync` | `storage.local` replicated across the user's devices (end-to-end encrypted) | data | on use |
-| `gpu.surface` | Handle to a GPU surface for `Canvas` nodes | host UI | none |
+| `gpu.surface` | Handle to a GPU surface for `Canvas` nodes (an app-painted pixel surface; not implemented). A `Canvas` can also carry a `drawing`, a display list of shapes the host paints, which needs no capability | host UI | none |
 
 ## Identity and session
 

@@ -8,6 +8,7 @@
 // needs. The app's code never runs in the browser: the page is a renderer that receives a validated tree and sends back
 // only {node, event, values}.
 
+import { loadNodeWebTransport } from "./wt-node.mjs";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
@@ -60,7 +61,7 @@ async function readJson(req, max = 64 * 1024) {
 const CALLBACK_PAGE = (message) =>
   `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lattice Navigator</title><body><main><h1>Lattice Navigator</h1><p>${message}</p></main>`;
 
-export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs, streamBackoffMs, analyticsOptions = {} }) {
+export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs, streamBackoffMs, webTransport = true, analyticsOptions = {} }) {
   const { url: appUrl, wasm, ...app } = await fetchApp(url, { dev });
   const entryJs = await prepareComponent({ manifest: app.manifest, wasm, cacheDir });
   const domain = app.manifest.app;
@@ -74,7 +75,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
 
   const controller = new Controller({
     app, kv: new FileKv(join(dataDir, "kv")), spawn: nodeSpawn, component: { entryJs }, uiOrigin,
-    dev, log, watchdogMs, rpcTimeoutMs, authTimeoutMs, streamBackoffMs, analyticsOptions,
+    dev, log, watchdogMs, rpcTimeoutMs, authTimeoutMs, streamBackoffMs, webTransportCtor: webTransport ? loadNodeWebTransport : null, analyticsOptions,
   });
   await controller.start(appUrl.pathname || "/");
 

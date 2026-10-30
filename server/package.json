@@ -14,5 +14,10 @@
     "ajv-formats": "^3.0.1",
     "jose": "^6.2.14",
     "stripe": "^23.1.0"
+  },
+  "optionalDependencies": {
+    "@fails-components/webtransport": "^1.6.11",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.11",
+    "reflect-metadata": "^0.2.2"
   }
 }

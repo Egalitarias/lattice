@@ -82,6 +82,8 @@ export class Session {
     this.log = log;
   }
 
+  #lastInput = new Map();
+
   /** Calls into the component are serialised, as the contract requires. */
   serial(fn) {
     const run = this.#chain.then(fn, fn);
@@ -171,13 +173,21 @@ export class Session {
   act(source, event, values) {
     return this.serial(() =>
       this.#call(async () => {
-        const field = { press: "onPress", submit: "onSubmit", change: "onChange" }[event];
+        const field = { press: "onPress", submit: "onSubmit", change: "onChange", input: "onInput" }[event];
         if (!field) throw new HttpError(400, "unknown event");
         const ref = this.store.actionRef(source, field);
         if (!ref) throw new HttpError(400, "that control has no such action");
 
+        if (event === "input") {
+          const gap = performance.now() - (this.#lastInput.get(source) ?? -Infinity);
+          if (gap < MIN_INPUT_GAP_MS) return { focus: undefined }; // faster than a person can act: dropped, not an error
+          this.#lastInput.set(source, performance.now());
+          checkCanvasInput(values);
+        }
+
         // Only the node's own fields, or fields of its form, may be submitted.
         const allowed = this.store.formFields(source);
+        if (this.store.get(source)?.body.tag === "canvas") for (const k of ["kind", "x", "y", "key"]) allowed.add(k);
         const own = this.store.get(source)?.body.val?.name;
         if (own) allowed.add(own);
         for (const k of Object.keys(values)) {
@@ -240,6 +250,18 @@ export class Session {
 
 const defaultLogger = () => {};
 const MAX_PUSHED_QUEUE = 64;
+const MIN_INPUT_GAP_MS = 25;
+const CANVAS_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
+
+/** What a canvas may send the app: a pointer position in drawing units, or one of a few keys. Anything else is refused. */
+function checkCanvasInput(v) {
+  const bad = () => new HttpError(400, "bad canvas input");
+  if (v.kind === "pointer") {
+    if (!Number.isFinite(v.x) || !Number.isFinite(v.y) || Math.abs(v.x) > 4096 || Math.abs(v.y) > 4096 || "key" in v) throw bad();
+  } else if (v.kind === "key") {
+    if (!CANVAS_KEYS.has(v.key) || "x" in v || "y" in v) throw bad();
+  } else throw bad();
+}
 
 export class Controller {
   #listeners = new Set();
@@ -252,8 +274,8 @@ export class Controller {
    * @param component     what the thread needs to load the transpiled component
    * @param uiOrigin      () => the origin the user's window is on (redirect URIs are built from it)
    */
-  constructor({ app, kv, spawn, component, uiOrigin, dev = false, log = defaultLogger, watchdogMs, streamBackoffMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {}, fetchImpl }) {
-    Object.assign(this, { app, kv, spawn, component, uiOrigin, dev, log, watchdogMs, streamBackoffMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions, fetchImpl });
+  constructor({ app, kv, spawn, component, uiOrigin, dev = false, log = defaultLogger, watchdogMs, streamBackoffMs, webTransportCtor, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {}, fetchImpl }) {
+    Object.assign(this, { app, kv, spawn, component, uiOrigin, dev, log, watchdogMs, streamBackoffMs, webTransportCtor, rpcTimeoutMs, authTimeoutMs, analyticsOptions, fetchImpl });
     this.manifest = app.manifest;
     this.domain = app.manifest.app;
   }
@@ -307,6 +329,8 @@ export class Controller {
     }
 
     // Server push: only for an app that holds net.realtime and whose API description declares topics.
+    // The WebTransport class is only loaded for an app that offers a stream endpoint (it is a native module in Node).
+    const WebTransportCtor = api?.stream ? await this.webTransportCtor?.() : null;
     const stream = rpc && granted.has("net.realtime") && api.description.topics
       ? new StreamClient({
           endpoint: api.endpoint,
@@ -316,6 +340,7 @@ export class Controller {
           onMessage: (topic, payload) => this.#pushed(topic, payload),
           onProblem: (topic, why) => log("warn", `topic ${topic}: ${why}`),
           backoffMs: this.streamBackoffMs,
+          webTransport: api.stream && WebTransportCtor ? { ctor: WebTransportCtor, url: api.stream.url, certHash: api.stream.certHash } : null,
           ...fetchOpt,
         })
       : null;

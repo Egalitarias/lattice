@@ -175,8 +175,37 @@ interface scene {
         description: string,
         /// Surface handle granted via `gpu.surface`.
         surface: option<string>,
+        /// A 2D picture the host paints. Data, not code: no capability is needed to draw it.
+        drawing: option<drawing>,
+        /// Pointer and keyboard input on the canvas. Arguments: `kind` ("pointer" | "key"), and `x`, `y` in drawing
+        /// units for a pointer, or `key` for a key (an arrow, space or enter). Rate-limited by the host.
         on-input: option<action-ref>,
     }
+
+    /// A display list painted in order on a surface of `width` x `height` drawing units (1 to 2048 each). The host
+    /// scales it to fit, resolves tones against the user's theme, and rejects a list with more than 2000 operations,
+    /// a non-finite or out-of-range number (beyond +/-100000), or text longer than 120 characters.
+    record drawing {
+        width: u32,
+        height: u32,
+        ops: list<draw-op>,
+    }
+
+    variant draw-op {
+        rect(draw-rect),
+        ellipse(draw-ellipse),
+        line(draw-line),
+        text(draw-text),
+    }
+
+    record draw-rect { x: f32, y: f32, w: f32, h: f32, tone: tone, outline: bool }
+
+    record draw-ellipse { cx: f32, cy: f32, rx: f32, ry: f32, tone: tone, outline: bool }
+
+    record draw-line { x1: f32, y1: f32, x2: f32, y2: f32, tone: tone, width: f32 }
+
+    /// Centred on (x, y). `size` is the height of the text in drawing units.
+    record draw-text { x: f32, y: f32, text: string, size: f32, tone: tone }
 
     // ---- Controls -----------------------------------------------------------------------------
 

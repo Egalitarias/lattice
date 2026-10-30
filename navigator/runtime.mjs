@@ -64,7 +64,18 @@ export async function fetchApp(url, { dev = false, strictDomain = false } = {}) 
     const apiProblem = checkApiDescription(description);
     if (apiProblem) throw new LoadError("API description does not match the schema:\n  " + apiProblem);
     // The declared URL names the app's origin; we reach it at the address we fetched the manifest from.
-    api = { description, hash: manifest.api.schema, endpoint: new URL(declared.pathname, u.origin).href };
+    api = { description, hash: manifest.api.schema, endpoint: new URL(declared.pathname, u.origin).href, stream: null };
+
+    // A WebTransport endpoint for topics, if offered. It must be on the app's own domain; we reach it at the address we
+    // fetched the manifest from (as for the API). A pinned certificate is honoured only for a loopback development origin:
+    // anywhere else the certificate must chain to a trusted root, whatever the manifest says.
+    if (manifest.api.stream) {
+      const s = new URL(manifest.api.stream);
+      if (s.hostname !== manifest.app) throw new LoadError(`api.stream is on ${s.hostname}, not the app's origin ${manifest.app}`);
+      const loopback = dev && (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || u.hostname.endsWith(".localhost"));
+      const pin = loopback && manifest.api.stream_cert_hash ? manifest.api.stream_cert_hash : null;
+      api.stream = { url: new URL(s.pathname + s.search, `https://${u.hostname}:${s.port || 443}`).href, certHash: pin };
+    }
   }
 
   let tokenEndpoint = null;

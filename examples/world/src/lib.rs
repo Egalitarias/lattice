@@ -23,13 +23,11 @@ const HEADER: NodeId = 2;
 const TITLE: NodeId = 3;
 const MAIN: NodeId = 4;
 const STATUS: NodeId = 5;
-const MAP: NodeId = 6;
 const PAD: NodeId = 7;
 const UP: NodeId = 8;
 const DOWN: NodeId = 9;
 const LEFT: NodeId = 10;
 const RIGHT: NodeId = 11;
-const CELL_BASE: NodeId = 1000;
 
 #[derive(Clone, Deserialize)]
 struct Player {
@@ -103,24 +101,53 @@ fn step_button(id: NodeId, label: &str, glyph: &str, dx: i32, dy: i32) -> Node {
     node(id, Body::Button(Button { label: label.into(), text: Some(glyph.into()), emphasis: ButtonEmphasis::Secondary, disabled: false, on_press: action }), &[])
 }
 
-/// One cell per grid square: the first letter of whoever stands there ("@" for you), otherwise a dot.
-fn cells() -> Vec<Node> {
+const CELL: f32 = 40.0;
+const CANVAS: NodeId = 6;
+
+/// The picture: a faint grid, then everyone standing on it. You are the accent colour; the others are green, each
+/// marked with the first letter of their name. The host decides what the tones look like.
+fn drawing() -> Drawing {
     STATE.with(|s| {
         let s = s.borrow();
-        let mut out = Vec::new();
-        for y in 0..s.height {
-            for x in 0..s.width {
-                let here = s.players.iter().find(|p| p.x == x && p.y == y);
-                let glyph = match here {
-                    Some(p) if p.id == s.me => "@".to_string(),
-                    Some(p) => p.name.chars().next().unwrap_or('?').to_string(),
-                    None => "·".to_string(),
-                };
-                out.push(node(CELL_BASE + y * s.width + x, text(&glyph), &[]));
-            }
+        let (w, h) = (s.width as f32 * CELL, s.height as f32 * CELL);
+        let mut ops = Vec::new();
+        for x in 0..=s.width {
+            let px = x as f32 * CELL;
+            ops.push(DrawOp::Line(DrawLine { x1: px, y1: 0.0, x2: px, y2: h, tone: Tone::Muted, width: 0.5 }));
         }
-        out
+        for y in 0..=s.height {
+            let py = y as f32 * CELL;
+            ops.push(DrawOp::Line(DrawLine { x1: 0.0, y1: py, x2: w, y2: py, tone: Tone::Muted, width: 0.5 }));
+        }
+        for p in &s.players {
+            let (cx, cy) = ((p.x as f32 + 0.5) * CELL, (p.y as f32 + 0.5) * CELL);
+            let me = p.id == s.me;
+            let tone = if me { Tone::Accent } else { Tone::Positive };
+            ops.push(DrawOp::Ellipse(DrawEllipse { cx, cy, rx: CELL * 0.38, ry: CELL * 0.38, tone, outline: false }));
+            if me {
+                ops.push(DrawOp::Ellipse(DrawEllipse { cx, cy, rx: CELL * 0.46, ry: CELL * 0.46, tone: Tone::Accent, outline: true }));
+            }
+            let initial = p.name.chars().next().unwrap_or('?').to_string();
+            ops.push(DrawOp::Text(DrawText { x: cx, y: cy, text: initial, size: CELL * 0.4, tone: Tone::Default }));
+        }
+        Drawing { width: s.width * CELL as u32, height: s.height * CELL as u32, ops }
     })
+}
+
+fn canvas_node() -> Node {
+    let who: Vec<String> = STATE.with(|s| s.borrow().players.iter().map(|p| format!("{} at column {}, row {}", p.name, p.x + 1, p.y + 1)).collect());
+    let description = format!("A grid you share with everyone online. Use the arrow keys, or click a square, to step. {}.", who.join("; "));
+    node(
+        CANVAS,
+        Body::Canvas(Canvas {
+            label: "The world".into(),
+            description,
+            surface: None,
+            drawing: Some(drawing()),
+            on_input: Some(ActionRef { action: "input".into(), args: vec![] }),
+        }),
+        &[],
+    )
 }
 
 fn status_text() -> String {
@@ -135,29 +162,50 @@ fn status_text() -> String {
 }
 
 fn world_scene() -> Scene {
-    let cell_ids: Vec<NodeId> = cells().iter().map(|n| n.id).collect();
-    let width = STATE.with(|s| s.borrow().width) as u8;
-    let mut nodes = vec![
+    let nodes = vec![
         node(ROOT, Body::Stack(Stack { axis: Axis::Vertical, gap: Token::Md, align: Align::Stretch, justify: Justify::Start, wrap: false }), &[HEADER, MAIN]),
         node(HEADER, Body::Region(Region { role: Landmark::Banner, label: "Site header".into() }), &[TITLE]),
         node(TITLE, Body::Heading(Heading { level: 1, text: "Lattice World".into() }), &[]),
-        node(MAIN, Body::Region(Region { role: Landmark::Main, label: "The world".into() }), &[STATUS, MAP, PAD]),
+        node(MAIN, Body::Region(Region { role: Landmark::Main, label: "The world".into() }), &[STATUS, CANVAS, PAD]),
         node(STATUS, text(&status_text()), &[]),
-        node(MAP, Body::Grid(Grid { columns: GridColumns::Fixed(width), gap: Token::Xs }), &cell_ids),
+        canvas_node(),
         node(PAD, Body::Stack(Stack { axis: Axis::Horizontal, gap: Token::Sm, align: Align::Center, justify: Justify::Start, wrap: true }), &[LEFT, UP, DOWN, RIGHT]),
         step_button(LEFT, "Move left", "←", -1, 0),
         step_button(UP, "Move up", "↑", 0, -1),
         step_button(DOWN, "Move down", "↓", 0, 1),
         step_button(RIGHT, "Move right", "→", 1, 0),
     ];
-    nodes.extend(cells());
     Scene { title: "Lattice World".into(), lang: Some("en".into()), live: Some(STATUS), root: ROOT, nodes }
 }
 
 fn redraw() -> Update {
-    let mut ops: Vec<PatchOp> = cells().into_iter().map(PatchOp::SetNode).collect();
-    ops.push(PatchOp::SetNode(node(STATUS, text(&status_text()), &[])));
-    Update { ops, focus: None }
+    Update { ops: vec![PatchOp::SetNode(canvas_node()), PatchOp::SetNode(node(STATUS, text(&status_text()), &[]))], focus: None }
+}
+
+/// Where a click or key asks to go, as a step: arrows are one square; a click steps toward that square.
+fn step_for(call: &ActionCall) -> Option<(i32, i32)> {
+    let text = |name: &str| call.values.iter().find_map(|(k, v)| match v { Scalar::Text(t) if k == name => Some(t.clone()), _ => None });
+    let num = |name: &str| call.values.iter().find_map(|(k, v)| match v { Scalar::Number(f) if k == name => Some(*f), Scalar::Integer(i) if k == name => Some(*i as f64), _ => None });
+    match text("kind")?.as_str() {
+        "key" => match text("key")?.as_str() {
+            "ArrowUp" => Some((0, -1)),
+            "ArrowDown" => Some((0, 1)),
+            "ArrowLeft" => Some((-1, 0)),
+            "ArrowRight" => Some((1, 0)),
+            _ => None,
+        },
+        "pointer" => {
+            let (cx, cy) = ((num("x")? / CELL as f64).floor() as i32, (num("y")? / CELL as f64).floor() as i32);
+            STATE.with(|s| {
+                let s = s.borrow();
+                let me = s.players.iter().find(|p| p.id == s.me)?;
+                let (dx, dy) = (cx - me.x as i32, cy - me.y as i32);
+                // One step along the longer axis, so a click across the board walks there a step at a time.
+                if dx == 0 && dy == 0 { None } else if dx.abs() >= dy.abs() { Some((dx.signum(), 0)) } else { Some((0, dy.signum())) }
+            })
+        }
+        _ => None,
+    }
 }
 
 struct WorldApp;
@@ -185,16 +233,22 @@ impl Guest for WorldApp {
     }
 
     fn dispatch(call: ActionCall) -> Result<Update, AppError> {
-        if call.action != "move" {
-            return Err(AppError::Invalid(format!("unknown action {}", call.action)));
-        }
-        let get = |name: &str| {
-            call.args.iter().find_map(|(k, v)| match v {
-                Scalar::Integer(i) if k == name => Some(*i as i32),
-                _ => None,
-            })
+        let (dx, dy) = match call.action.as_str() {
+            "move" => {
+                let get = |name: &str| {
+                    call.args.iter().find_map(|(k, v)| match v {
+                        Scalar::Integer(i) if k == name => Some(*i as i32),
+                        _ => None,
+                    })
+                };
+                (get("dx").unwrap_or(0), get("dy").unwrap_or(0))
+            }
+            "input" => match step_for(&call) {
+                Some(step) => step,
+                None => return Ok(Update { ops: vec![], focus: None }),
+            },
+            other => return Err(AppError::Invalid(format!("unknown action {other}"))),
         };
-        let (dx, dy) = (get("dx").unwrap_or(0), get("dy").unwrap_or(0));
         let _: serde::de::IgnoredAny = api("move", &Step { dx, dy })?;
         // The new position arrives on the topic, like everyone else's: nothing is drawn from the reply.
         Ok(Update { ops: vec![], focus: None })

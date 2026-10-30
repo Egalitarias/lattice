@@ -1,5 +1,8 @@
-// Server side of Lattice topics (spec/rpc.md, "Topics"): GET {api.url}/_topics/{topic} streams newline-delimited JSON
-// frames `{"seq":n,"payload":{...}}`. The server publishes; every message is validated against the description first.
+// Server side of Lattice topics (spec/rpc.md, "Topics"). A subscriber receives newline-delimited JSON frames
+// `{"seq":n,"payload":{...}}` and a blank line as a heartbeat. The same frames travel over two transports:
+//   - streaming HTTPS:  GET {api.url}/_topics/{topic}                       (handle, below)
+//   - WebTransport:     a bidirectional stream per subscription             (webtransport.mjs, via open)
+// The server publishes; every message is validated against the API description before anyone sees it.
 
 import { Schema } from "../shared/schema.mjs";
 import { encode } from "../shared/cbor.mjs";
@@ -10,6 +13,8 @@ const MAX_QUEUED = 256 * 1024;
 /**
  * @param opts.authorize  (topic, ctx) => void | { snapshot?: message }; throw ApiError to refuse. ctx = { session }.
  * @param opts.maxSubscribers  per topic
+ *
+ * A *sink* is where one subscriber's frames go: { write(string), queued() -> bytes waiting, destroy(), onClose(fn) }.
  */
 export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs = 15_000, maxSubscribers = 1000, log = console.error }) {
   const topics = new Map();
@@ -32,12 +37,38 @@ export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs =
   }
 
   function send(t, sub, message) {
-    if (sub.res.writableLength > MAX_QUEUED) {
+    if (sub.sink.queued() > MAX_QUEUED) {
       t.subs.delete(sub);
-      sub.res.destroy();
+      sub.sink.destroy();
       return;
     }
-    sub.res.write(`${JSON.stringify({ seq: ++sub.seq, payload: message })}\n`);
+    sub.sink.write(`${JSON.stringify({ seq: ++sub.seq, payload: message })}\n`);
+  }
+
+  /**
+   * Start one subscription. Throws ApiError when it is refused (unknown topic, wrong API, not allowed, too many).
+   * `request` is { api, session }, the two things a client states about itself on either transport.
+   */
+  async function open(topic, request, sink) {
+    const t = topics.get(topic);
+    if (!t) throw new ApiError("not_found", `no such topic: ${topic}`);
+    if (request.api !== apiHash) throw new ApiError("api_mismatch", "the client is using a different API description");
+    if (t.subs.size >= maxSubscribers) throw new ApiError("rate_limited", "too many subscribers");
+    const ctx = { session: typeof request.session === "string" && request.session ? request.session : undefined };
+    const grant = (await authorize?.(topic, ctx)) ?? {};
+    if (grant.snapshot !== undefined) check(topic, grant.snapshot);
+
+    const sub = { sink, ctx, seq: 0 };
+    t.subs.add(sub);
+    const beat = setInterval(() => sink.write("\n"), heartbeatMs);
+    beat.unref?.();
+    sink.onClose(() => {
+      clearInterval(beat);
+      t.subs.delete(sub);
+    });
+    if (grant.snapshot !== undefined) send(t, sub, grant.snapshot);
+    else sink.write("\n"); // tells the client the stream is open
+    return { close: () => sink.destroy() };
   }
 
   return {
@@ -47,29 +78,26 @@ export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs =
       for (const sub of [...t.subs]) if (!to || to(sub.ctx)) send(t, sub, message);
     },
     subscribers: (topic) => topics.get(topic)?.subs.size ?? 0,
+    has: (topic) => topics.has(topic),
+    open,
 
+    /** The streaming-HTTPS transport. */
     async handle(req, res, topic) {
       try {
-        const t = topics.get(topic);
         if (req.method !== "GET") return fail(res, 405, "invalid_request", "topics are read with GET");
-        if (!t) return fail(res, 404, "not_found", `no such topic: ${topic}`);
-        if (req.headers["lattice-api"] !== apiHash) return fail(res, 412, "api_mismatch", "the client is using a different API description");
-        if (t.subs.size >= maxSubscribers) return fail(res, 429, "rate_limited", "too many subscribers");
-        const session = req.headers["lattice-session"];
-        const ctx = { session: typeof session === "string" && session ? session : undefined };
-        const grant = (await authorize?.(topic, ctx)) ?? {};
-        if (grant.snapshot !== undefined) check(topic, grant.snapshot);
-
-        res.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
-        const sub = { res, ctx, seq: 0 };
-        t.subs.add(sub);
-        const beat = setInterval(() => res.write("\n"), heartbeatMs);
-        beat.unref?.();
-        const done = () => { clearInterval(beat); t.subs.delete(sub); };
-        res.on("close", done);
-        res.on("error", done);
-        if (grant.snapshot !== undefined) send(t, sub, grant.snapshot);
-        else res.write("\n"); // flush headers so the client knows the stream is open
+        const sink = {
+          write(s) {
+            if (!res.headersSent) res.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
+            res.write(s);
+          },
+          queued: () => res.writableLength,
+          destroy: () => res.destroy(),
+          onClose(fn) {
+            res.on("close", fn);
+            res.on("error", fn);
+          },
+        };
+        await open(topic, { api: req.headers["lattice-api"], session: req.headers["lattice-session"] }, sink);
       } catch (e) {
         if (e instanceof ApiError) return fail(res, e.status, e.code, e.message);
         log(`topic ${topic}: ${e.stack ?? e}`);
@@ -78,7 +106,7 @@ export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs =
     },
 
     close() {
-      for (const t of topics.values()) for (const s of t.subs) s.res.destroy();
+      for (const t of topics.values()) for (const s of t.subs) s.sink.destroy();
     },
   };
 }

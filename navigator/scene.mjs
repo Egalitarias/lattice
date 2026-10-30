@@ -4,6 +4,30 @@
 
 export class SceneError extends Error {}
 
+export const MAX_DRAW_OPS = 2000;
+export const MAX_DRAW_TEXT = 120;
+const MAX_COORD = 100_000;
+const DRAW_NUMBERS = { rect: ["x", "y", "w", "h"], ellipse: ["cx", "cy", "rx", "ry"], line: ["x1", "y1", "x2", "y2", "width"], text: ["x", "y", "size"] };
+
+/** A drawing is data the host paints; refuse anything that could be abused to exhaust it or that is not a picture. */
+export function checkDrawing(id, d) {
+  const where = `canvas ${id}`;
+  for (const k of ["width", "height"]) {
+    if (!Number.isInteger(d[k]) || d[k] < 1 || d[k] > 2048) throw new SceneError(`${where}: drawing ${k} must be 1 to 2048`);
+  }
+  if (d.ops.length > MAX_DRAW_OPS) throw new SceneError(`${where}: a drawing has at most ${MAX_DRAW_OPS} operations`);
+  for (const op of d.ops) {
+    const fields = DRAW_NUMBERS[op.tag];
+    if (!fields) throw new SceneError(`${where}: unknown drawing operation`);
+    for (const f of fields) {
+      const n = op.val[f];
+      if (!Number.isFinite(n) || Math.abs(n) > MAX_COORD) throw new SceneError(`${where}: ${op.tag}.${f} is not a number in range`);
+    }
+    if (op.tag === "text" && (op.val.text.length > MAX_DRAW_TEXT || op.val.size <= 0)) throw new SceneError(`${where}: drawing text is empty-sized or longer than ${MAX_DRAW_TEXT} characters`);
+    if (op.tag === "line" && op.val.width < 0) throw new SceneError(`${where}: line width cannot be negative`);
+  }
+}
+
 const LEAF = new Set(["heading", "text", "link", "button", "input", "select", "checkbox", "image", "media", "canvas", "ad-slot"]);
 const CONTAINER_ONE = new Set(["scroll"]);
 // Action-ref carrying fields on each body type.
@@ -135,6 +159,9 @@ export class SceneStore {
       case "heading":
         if (v.level < 1 || v.level > 6) throw new SceneError(`heading ${n.id} level must be 1-6`);
         break;
+      case "canvas":
+        if (v.drawing) checkDrawing(n.id, v.drawing);
+        break;
       case "table":
         for (const row of v.rows) {
           if (row.length !== v.columns.length) throw new SceneError(`table ${n.id} row has ${row.length} cells for ${v.columns.length} columns`);
@@ -164,6 +191,7 @@ export class SceneStore {
       if (ACTION_FIELDS.includes(k)) out[k] = true; // the UI only learns *that* an action exists; Lattice Navigator keeps the ref
       else if (k === "rows") out.rows = val.map((r) => r.map(scalar));
       else if (k === "props") out.props = argsObject(val);
+      else if (k === "drawing") out.drawing = val; // already validated by checkDrawing; plain data
       else if (typeof val === "bigint") out[k] = Number(val);
       else out[k] = val;
     }

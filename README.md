@@ -139,6 +139,8 @@ cd examples/world && cargo build --release --target wasm32-wasip2 && cd ../..
 cd server && node server.mjs --app ../examples/world --port 8081 --dev     # open http://world.localhost:8081/
 ```
 
+The world is painted on a `Canvas` from a display list, and moves with the arrow keys or a click. With `--dev` the
+server also starts a WebTransport listener (the optional packages must be installed) and the page uses it. 
 `node test/world-browser-check.mjs` drives two real browsers through it.
 
 ### Browser mode
@@ -176,13 +178,14 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   catches values the user typed into sensitive inputs and common personal-data patterns in error text; it cannot catch
   data the app has transformed. The processor's server necessarily sees the user's IP address.
 - RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps state in memory.
-- Server push: declared `topics` delivered as newline-delimited JSON over a streaming HTTPS response (`spec/rpc.md`,
-  "Topics"), validated by the host, bounded and re-connecting. Real WebTransport (HTTP/3, datagrams) is not implemented:
-  Node 22 has no HTTP/3 server, so the framing is kept transport-neutral for it. No resumable streams: a reconnect gets
+- Server push: declared `topics` delivered over WebTransport (HTTP/3, via the optional `@fails-components/webtransport`
+  package) or, as a fallback, streaming HTTPS (`spec/rpc.md`, "Topics"); validated by the host, bounded and
+  re-connecting. WebTransport datagrams are not used. A development certificate is pinned through the manifest
+  (loopback only); production needs a real certificate and a UDP port. No resumable streams: a reconnect gets
   a fresh snapshot from the server, so topics should carry state, not commands.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
   differs from the address fetched.
-- Renderer gaps: `layer` constraints, `canvas`, `media` with hashed sources, `ad-slot` and `embed` are placeholders.
+- Renderer gaps: `layer` constraints, GPU-surface `canvas` (display-list drawings work), `media` with hashed sources, `ad-slot` and `embed` are placeholders.
 - Rust apps built for `wasm32-wasip2` import libc-level WASI; Lattice Navigator provides a sandboxed shim with no filesystem,
   environment or network.
 - One user, one app instance per Lattice Navigator process.
@@ -199,7 +202,8 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
 6d. [ ] A host-drawn payment sheet, experiments
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
-7b. [ ] WebTransport as a second transport, and a canvas-drawn 2D world
+7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
+7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface
 
 ## License
 

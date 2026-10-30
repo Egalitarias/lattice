@@ -82,6 +82,7 @@ async function main() {
   const controller = new Controller({
     app,
     kv: new LocalStorageKv("lattice:"),
+    webTransportCtor: () => globalThis.WebTransport ?? null,
     spawn: webSpawn(new URL("component-worker.js", import.meta.url)),
     component: { files },
     uiOrigin: () => location.origin,

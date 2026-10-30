@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "start": "node navigator.mjs",
-    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs test/analytics.test.mjs test/schema.test.mjs test/browser-build.test.mjs test/stream.test.mjs",
+    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs test/analytics.test.mjs test/schema.test.mjs test/browser-build.test.mjs test/stream.test.mjs test/canvas.test.mjs test/webtransport.test.mjs",
     "build:browser": "node browser/build.mjs"
   },
   "dependencies": {
@@ -19,5 +19,10 @@
   "devDependencies": {
     "esbuild": "^0.28.2",
     "jose": "^6.2.14"
+  },
+  "optionalDependencies": {
+    "@fails-components/webtransport": "^1.6.11",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.11",
+    "reflect-metadata": "^0.2.2"
   }
 }

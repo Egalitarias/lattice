@@ -439,11 +439,35 @@
       "properties": {
         "type": { "const": "Canvas" },
         "surface": { "description": "Surface handle granted via gpu.surface.", "type": "string" },
+        "drawing": { "$ref": "#/$defs/drawing" },
         "mirror": {
           "description": "Optional accessible subtree describing canvas contents (e.g. inventory slots, nearby players). Not painted; exposed to assistive tech and agents.",
           "$ref": "#/$defs/children"
         },
-        "on_input": { "$ref": "#/$defs/actionRef" }
+        "on_input": { "description": "Dispatched for pointer and keyboard input on the canvas, with args kind ('pointer' | 'key'), x and y in drawing units, or key. Rate-limited by the host.", "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "drawing": {
+      "description": "A 2D picture the host paints: a display list of shapes in drawing units, with colours given as tones the host resolves against the user's theme. Data, not code. Hosts reject more than 2000 operations, numbers beyond +/-100000, and text longer than 120 characters.",
+      "type": "object",
+      "required": ["width", "height", "ops"],
+      "additionalProperties": false,
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 2048 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 2048 },
+        "ops": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "oneOf": [
+              { "type": "object", "required": ["op", "x", "y", "w", "h"], "additionalProperties": false, "properties": { "op": { "const": "rect" }, "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" }, "tone": { "$ref": "#/$defs/tone" }, "outline": { "type": "boolean", "default": false } } },
+              { "type": "object", "required": ["op", "cx", "cy", "rx", "ry"], "additionalProperties": false, "properties": { "op": { "const": "ellipse" }, "cx": { "type": "number" }, "cy": { "type": "number" }, "rx": { "type": "number" }, "ry": { "type": "number" }, "tone": { "$ref": "#/$defs/tone" }, "outline": { "type": "boolean", "default": false } } },
+              { "type": "object", "required": ["op", "x1", "y1", "x2", "y2"], "additionalProperties": false, "properties": { "op": { "const": "line" }, "x1": { "type": "number" }, "y1": { "type": "number" }, "x2": { "type": "number" }, "y2": { "type": "number" }, "width": { "type": "number", "minimum": 0, "default": 1 }, "tone": { "$ref": "#/$defs/tone" } } },
+              { "type": "object", "required": ["op", "x", "y", "text", "size"], "additionalProperties": false, "properties": { "op": { "const": "text" }, "x": { "type": "number" }, "y": { "type": "number" }, "text": { "type": "string", "maxLength": 120 }, "size": { "type": "number", "exclusiveMinimum": 0 }, "tone": { "$ref": "#/$defs/tone" } } }
+            ]
+          }
+        }
       }
     },
 

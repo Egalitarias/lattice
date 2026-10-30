@@ -228,7 +228,10 @@ async function player(w) {
   const nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `${w.base}/`, dev: true, port: 0, dataDir: dir, log: quiet, streamBackoffMs: [20, 100] });
   const state = () => fetch(`http://127.0.0.1:${nav.port}/_navigator/state`).then((r) => r.json());
   const status = async () => find((await state()).tree, (n) => /online/.test(n.props?.text ?? ""))?.props.text;
-  const cells = async () => all((await state()).tree, (n) => n.type === "text" && /^(@|·|[A-Z])$/.test(n.props.text)).map((n) => n.props.text);
+  // Where everyone is drawn: the filled circles of the canvas's drawing, as "x,y" cells of 40 units.
+  const canvas = async () => find((await state()).tree, (n) => n.type === "canvas");
+  const cells = async () => (await canvas()).props.drawing.ops.filter((o) => o.tag === "ellipse" && !o.val.outline).map((o) => `${Math.floor(o.val.cx / 40)},${Math.floor(o.val.cy / 40)}`).sort();
+  const at = async () => (await status())?.match(/column (\d+), row (\d+)/)?.slice(1).join(",");
   const move = async (label) => {
     const b = find((await state()).tree, (n) => n.type === "button" && n.props.label === label);
     const r = await fetch(`http://127.0.0.1:${nav.port}/_navigator/act`, {
@@ -239,7 +242,7 @@ async function player(w) {
     return r.status;
   };
   return {
-    nav, state, status, cells, move,
+    nav, state, status, cells, at, canvas, move,
     stop: async () => {
       await nav.close();
       rmSync(dir, { recursive: true, force: true });
@@ -257,25 +260,19 @@ test("world: two Navigators see each other arrive and move, without polling", as
     assert.ok(await until(async () => /^2 online\./.test((await a.status()) ?? "")), "a sees b arrive");
     assert.ok(await until(async () => /^2 online\./.test((await b.status()) ?? "")), "b sees both");
 
-    const where = async (p) => (await p.cells()).indexOf("@");
-    const before = await where(b);
+    const before = await b.at();
     let moved = false;
     for (const dir of ["Move right", "Move left", "Move down", "Move up"]) {
       assert.equal(await b.move(dir), 200);
-      if (await until(async () => (await where(b)) !== before, 600)) {
+      if (await until(async () => (await b.at()) !== before, 600)) {
         moved = true;
         break;
       }
     }
     assert.ok(moved, "b sees its own move, delivered by the server over the topic");
-    const mine = (await b.cells()).join("");
-    assert.ok(
-      await until(async () => {
-        const seen = await a.cells();
-        return seen.filter((c) => c !== "·").length === 2 && seen.join("") !== mine;
-      }),
-      "a sees b somewhere else on the grid"
-    );
+    const [bx, by] = (await b.at()).split(",").map(Number);
+    assert.ok(await until(async () => (await a.cells()).includes(`${bx - 1},${by - 1}`)), "a sees b drawn at the new square");
+    assert.equal((await a.cells()).length, 2);
   } finally {
     await b?.stop();
     await a.stop();
