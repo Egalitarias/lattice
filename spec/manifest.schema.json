@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lattice.invalid/spec/0.1/manifest.schema.json",
+  "title": "Lattice App Manifest",
+  "description": "Served by an origin in response to Accept: application/vnd.lattice.app+cbor. Authored and validated as JSON; sent on the wire as CBOR.",
+  "type": "object",
+  "required": ["lattice", "app", "version", "entry", "routes"],
+  "additionalProperties": false,
+  "properties": {
+    "lattice": {
+      "description": "Spec version this manifest targets.",
+      "type": "string",
+      "pattern": "^0\\.1(\\.\\d+)?$"
+    },
+    "app": {
+      "description": "Domain this app is served from. Must equal the origin host the manifest was fetched from; hosts reject mismatches.",
+      "$ref": "#/$defs/domain"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "maxLength": 300 },
+    "version": {
+      "description": "Semantic version of this release.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+    },
+    "lang": {
+      "description": "Default BCP 47 language tag.",
+      "type": "string",
+      "pattern": "^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$"
+    },
+    "icon": { "$ref": "#/$defs/hash" },
+
+    "entry": {
+      "description": "Content hash of the root WASM component. Immutable and cacheable forever.",
+      "$ref": "#/$defs/hash"
+    },
+    "assets": {
+      "description": "Optional named asset bundles, fetched on demand by hash.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/hash" }
+    },
+    "dependencies": {
+      "description": "Third-party components. Always declared and hash-pinned; there is no runtime script injection.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "hash"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "hash": { "$ref": "#/$defs/hash" },
+          "capabilities": { "$ref": "#/$defs/capabilityList" }
+        }
+      }
+    },
+
+    "routes": {
+      "description": "URL path pattern -> handler name exported by the entry component. {param} captures a path segment; {param*} captures the remainder.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^/([A-Za-z0-9._~\\-]+|\\{[a-z][A-Za-z0-9_]*\\*?\\})?(/([A-Za-z0-9._~\\-]+|\\{[a-z][A-Za-z0-9_]*\\*?\\}))*$" },
+      "additionalProperties": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+    },
+
+    "api": {
+      "description": "Typed RPC endpoint the app talks to.",
+      "type": "object",
+      "required": ["url", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "schema": { "description": "Hash of the interface definition (WIT).", "$ref": "#/$defs/hash" },
+        "stream": { "description": "Optional WebTransport endpoint for server push / real time.", "type": "string", "pattern": "^https://" }
+      }
+    },
+
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requires": {
+          "description": "Host must grant these or refuse to run the app.",
+          "$ref": "#/$defs/capabilityList"
+        },
+        "optional": {
+          "description": "App degrades gracefully without these.",
+          "$ref": "#/$defs/capabilityList"
+        }
+      }
+    },
+
+    "actions": {
+      "description": "Agent-readable action surface. Every action is also reachable from the human UI.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    },
+
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "providers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "enum": ["passkey", "oidc"] },
+              "issuer": { "type": "string", "pattern": "^https://" },
+              "client_id": { "type": "string" },
+              "scopes": { "type": "array", "items": { "type": "string" } }
+            },
+            "if": { "properties": { "type": { "const": "oidc" } } },
+            "then": { "required": ["issuer", "client_id"] }
+          }
+        },
+        "token_endpoint": { "description": "Your server endpoint that exchanges the host-obtained code/assertion for a session.", "type": "string", "pattern": "^https://" }
+      }
+    },
+
+    "payments": {
+      "type": "object",
+      "required": ["handlers", "merchant", "server"],
+      "additionalProperties": false,
+      "properties": {
+        "handlers": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "merchant": {
+          "type": "object",
+          "required": ["domain"],
+          "additionalProperties": false,
+          "properties": {
+            "domain": { "$ref": "#/$defs/domain" },
+            "stripe_account": { "type": "string", "pattern": "^acct_[A-Za-z0-9]+$" },
+            "stripe_publishable_key": { "type": "string", "pattern": "^pk_(test|live)_[A-Za-z0-9]+$" }
+          }
+        },
+        "server": { "type": "string", "pattern": "^https://" }
+      }
+    },
+
+    "analytics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "processors": {
+          "description": "Every endpoint that may receive analytics events. Shown to the user in host settings; events to undeclared endpoints are dropped.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "endpoint"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "endpoint": { "type": "string", "pattern": "^https://" },
+              "purpose": { "enum": ["product", "performance", "errors", "advertising", "experiments"] }
+            }
+          }
+        }
+      }
+    },
+
+    "legal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "privacy": { "type": "string", "pattern": "^https://" },
+        "terms": { "type": "string", "pattern": "^https://" },
+        "data_export": { "description": "Endpoint implementing the standard data export request.", "type": "string", "pattern": "^https://" },
+        "data_delete": { "description": "Endpoint implementing the standard deletion request.", "type": "string", "pattern": "^https://" }
+      }
+    },
+
+    "fallback": {
+      "description": "Legacy support: where non-Lattice clients should be sent.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "html": { "type": "string", "pattern": "^(https://|/)" }
+      }
+    },
+
+    "signature": {
+      "description": "Optional detached signature over the canonical (deterministic CBOR) manifest without this field.",
+      "type": "object",
+      "required": ["alg", "key", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "alg": { "enum": ["ed25519"] },
+        "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "sig": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      }
+    }
+  },
+
+  "$defs": {
+    "domain": {
+      "type": "string",
+      "pattern": "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    },
+    "hash": {
+      "description": "SHA-256 digest, unpadded base64url (32 bytes -> 43 chars), prefixed 'sha256-'.",
+      "type": "string",
+      "pattern": "^sha256-[A-Za-z0-9_-]{43}$"
+    },
+    "capabilityName": {
+      "description": "A catalogued capability (see capabilities.md), an embed.<provider>, or a vendor extension prefixed x-.",
+      "type": "string",
+      "oneOf": [
+        {
+          "enum": [
+            "net.origin", "storage.local", "storage.sync",
+            "auth.oidc", "auth.passkey", "session",
+            "payments.request", "payments.mandate",
+            "ads.slot",
+            "analytics.event", "experiments",
+            "notifications", "share", "files.pick", "contacts.pick",
+            "identity.age_over", "consent",
+            "navigate.external",
+            "camera", "microphone", "location",
+            "gpu.surface", "net.realtime"
+          ]
+        },
+        { "pattern": "^embed\\.[a-z0-9-]+$" },
+        { "pattern": "^x-[a-z0-9-]+(\\.[a-z0-9_-]+)*$" }
+      ]
+    },
+    "capabilityList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/capabilityName" }
+    },
+    "action": {
+      "type": "object",
+      "required": ["name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "input": {
+          "description": "JSON-Schema-subset describing arguments. Flat objects of primitives, enums and arrays of primitives.",
+          "type": "object"
+        },
+        "effect": {
+          "description": "Declared side-effect class. Hosts and agents use this to decide on confirmation.",
+          "enum": ["read", "write", "destructive", "financial", "external"],
+          "default": "write"
+        },
+        "requires_human_confirmation": {
+          "description": "Forced true by hosts for effect=financial or destructive.",
+          "type": "boolean",
+          "default": false
+        },
+        "route": { "description": "Route pattern where this action is available, if scoped.", "type": "string" }
+      }
+    }
+  }
+}

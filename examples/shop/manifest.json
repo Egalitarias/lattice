@@ -1,0 +1,57 @@
+{
+  "lattice": "0.1",
+  "app": "shop.example.com",
+  "name": "Example Shop",
+  "version": "1.0.0",
+  "lang": "en",
+  "icon": "sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+  "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": {
+    "/": "Home",
+    "/orders/{id}": "OrderView",
+    "/docs/{path*}": "Docs"
+  },
+  "api": {
+    "url": "https://shop.example.com/rpc",
+    "schema": "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    "stream": "https://shop.example.com/live"
+  },
+  "capabilities": {
+    "requires": ["net.origin", "storage.local", "session"],
+    "optional": ["auth.passkey", "auth.oidc", "payments.request", "notifications", "navigate.external", "embed.maps"]
+  },
+  "dependencies": [
+    { "name": "maps", "hash": "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "capabilities": ["net.origin"] }
+  ],
+  "actions": [
+    { "name": "search_products", "description": "Search the catalogue by text.", "effect": "read",
+      "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } },
+    { "name": "reorder", "description": "Place a repeat of a previous order.", "effect": "financial", "requires_human_confirmation": true,
+      "input": { "type": "object", "properties": { "order_id": { "type": "string" } }, "required": ["order_id"] },
+      "route": "/orders/{id}" }
+  ],
+  "auth": {
+    "providers": [
+      { "type": "passkey" },
+      { "type": "oidc", "issuer": "https://accounts.google.com", "client_id": "example-client-id", "scopes": ["openid", "email"] }
+    ],
+    "token_endpoint": "https://shop.example.com/auth/token"
+  },
+  "payments": {
+    "handlers": ["stripe"],
+    "merchant": { "domain": "shop.example.com", "stripe_account": "acct_1ABC", "stripe_publishable_key": "pk_test_abc123" },
+    "server": "https://shop.example.com/rpc/pay"
+  },
+  "analytics": {
+    "processors": [
+      { "name": "First party", "endpoint": "https://shop.example.com/events", "purpose": "product" }
+    ]
+  },
+  "legal": {
+    "privacy": "https://shop.example.com/privacy",
+    "terms": "https://shop.example.com/terms",
+    "data_export": "https://shop.example.com/rpc/export",
+    "data_delete": "https://shop.example.com/rpc/delete"
+  },
+  "fallback": { "html": "/legacy/" }
+}

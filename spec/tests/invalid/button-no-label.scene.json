@@ -1,0 +1,1 @@
+{ "title": "x", "root": { "type": "Button", "on_press": { "action": "go" } } }

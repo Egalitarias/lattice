@@ -1,0 +1,481 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lattice.invalid/spec/0.1/scene.schema.json",
+  "title": "Lattice Scene Tree",
+  "description": "The UI an app hands to Lattice Navigator. A tree of semantic nodes. There is no markup, no stylesheet, and no code in the tree: appearance comes from design tokens resolved by the host, and behaviour comes from named actions dispatched back to the app.",
+  "$ref": "#/$defs/document",
+
+  "$defs": {
+    "document": {
+      "type": "object",
+      "required": ["title", "root"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "lang": { "type": "string" },
+        "root": { "$ref": "#/$defs/node" },
+        "live": {
+          "description": "Id of a node whose subtree changes are announced to assistive tech.",
+          "type": "string"
+        }
+      }
+    },
+
+    "node": {
+      "oneOf": [
+        { "$ref": "#/$defs/Stack" },
+        { "$ref": "#/$defs/Grid" },
+        { "$ref": "#/$defs/Scroll" },
+        { "$ref": "#/$defs/Layer" },
+        { "$ref": "#/$defs/Region" },
+        { "$ref": "#/$defs/Heading" },
+        { "$ref": "#/$defs/Text" },
+        { "$ref": "#/$defs/Link" },
+        { "$ref": "#/$defs/Button" },
+        { "$ref": "#/$defs/Form" },
+        { "$ref": "#/$defs/Input" },
+        { "$ref": "#/$defs/Select" },
+        { "$ref": "#/$defs/Checkbox" },
+        { "$ref": "#/$defs/List" },
+        { "$ref": "#/$defs/Table" },
+        { "$ref": "#/$defs/Image" },
+        { "$ref": "#/$defs/Media" },
+        { "$ref": "#/$defs/Canvas" },
+        { "$ref": "#/$defs/AdSlot" },
+        { "$ref": "#/$defs/Embed" }
+      ],
+      "discriminator": { "propertyName": "type" }
+    },
+
+    "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+
+    "token": {
+      "description": "Spacing scale step. The host maps steps to real sizes according to user density and text-size settings.",
+      "enum": ["none", "xs", "sm", "md", "lg", "xl"]
+    },
+
+    "size": {
+      "description": "How a node sizes along an axis.",
+      "oneOf": [
+        { "enum": ["hug", "fill"] },
+        {
+          "type": "object",
+          "required": ["fraction"],
+          "additionalProperties": false,
+          "properties": { "fraction": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } }
+        },
+        {
+          "type": "object",
+          "required": ["units"],
+          "additionalProperties": false,
+          "properties": {
+            "units": { "description": "Density-independent units, scaled by the host.", "type": "number", "exclusiveMinimum": 0 },
+            "min": { "type": "number", "minimum": 0 },
+            "max": { "type": "number", "minimum": 0 }
+          }
+        }
+      ]
+    },
+
+    "tone": {
+      "description": "Semantic colour role, never a raw colour.",
+      "enum": ["default", "muted", "accent", "positive", "caution", "critical"]
+    },
+
+    "common": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "hidden": { "type": "boolean", "default": false },
+        "width": { "$ref": "#/$defs/size" },
+        "height": { "$ref": "#/$defs/size" },
+        "padding": { "$ref": "#/$defs/token" },
+        "tone": { "$ref": "#/$defs/tone" },
+        "label": {
+          "description": "Accessible name. Required on every interactive or landmark node; optional elsewhere.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": { "description": "Longer accessible description / help text.", "type": "string", "maxLength": 500 },
+        "lang": { "type": "string" }
+      }
+    },
+
+    "children": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" },
+      "maxItems": 5000
+    },
+
+    "actionRef": {
+      "description": "Dispatches a named handler in the app. The name must be exported by the app component; it is never evaluated as code.",
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": {
+        "action": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "number", "boolean", "null"]
+          }
+        }
+      }
+    },
+
+    "Stack": {
+      "description": "Lays children out along one axis.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Stack" },
+        "axis": { "enum": ["vertical", "horizontal"], "default": "vertical" },
+        "gap": { "$ref": "#/$defs/token" },
+        "align": { "enum": ["start", "center", "end", "stretch"], "default": "stretch" },
+        "justify": { "enum": ["start", "center", "end", "between"], "default": "start" },
+        "wrap": { "type": "boolean", "default": false },
+        "children": { "$ref": "#/$defs/children" }
+      }
+    },
+
+    "Grid": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "columns", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Grid" },
+        "columns": {
+          "description": "Fixed count, or 'auto' to fit as many columns as a minimum width allows.",
+          "oneOf": [
+            { "type": "integer", "minimum": 1, "maximum": 24 },
+            {
+              "type": "object",
+              "required": ["auto_min_units"],
+              "additionalProperties": false,
+              "properties": { "auto_min_units": { "type": "number", "exclusiveMinimum": 0 } }
+            }
+          ]
+        },
+        "gap": { "$ref": "#/$defs/token" },
+        "children": { "$ref": "#/$defs/children" }
+      }
+    },
+
+    "Scroll": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "child"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Scroll" },
+        "axis": { "enum": ["vertical", "horizontal", "both"], "default": "vertical" },
+        "child": { "$ref": "#/$defs/node" },
+        "on_end": { "description": "Dispatched when scrolled near the end (infinite lists).", "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Layer": {
+      "description": "Children stacked on the z-axis, positioned by constraints. For overlays and free layout.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Layer" },
+        "children": { "$ref": "#/$defs/children" },
+        "constraints": {
+          "description": "Linear relations: target.attr = ref.attr * multiplier + offset (Cassowary-style).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["target", "attr"],
+            "additionalProperties": false,
+            "properties": {
+              "target": { "$ref": "#/$defs/id" },
+              "attr": { "enum": ["left", "right", "top", "bottom", "width", "height", "centerX", "centerY"] },
+              "ref": { "description": "Another node id, or 'parent'.", "type": "string" },
+              "ref_attr": { "enum": ["left", "right", "top", "bottom", "width", "height", "centerX", "centerY"] },
+              "multiplier": { "type": "number", "default": 1 },
+              "offset": { "type": "number", "default": 0 },
+              "strength": { "enum": ["required", "strong", "medium", "weak"], "default": "required" }
+            }
+          }
+        }
+      }
+    },
+
+    "Region": {
+      "description": "A named landmark. Gives screen readers and agents the page's structure.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "role", "label", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Region" },
+        "role": { "enum": ["banner", "navigation", "main", "complementary", "contentinfo", "search", "dialog", "alert", "status"] },
+        "children": { "$ref": "#/$defs/children" }
+      }
+    },
+
+    "Heading": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "level", "text"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Heading" },
+        "level": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "Text": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "text"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Text" },
+        "text": { "type": "string" },
+        "style": { "enum": ["body", "caption", "code", "quote"], "default": "body" },
+        "emphasis": { "enum": ["none", "strong", "em"], "default": "none" },
+        "max_lines": { "type": "integer", "minimum": 1 },
+        "selectable": { "type": "boolean", "default": true }
+      }
+    },
+
+    "Link": {
+      "description": "Navigation. Targets are URLs; same-origin targets are resolved against the manifest routes.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "to", "label"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Link" },
+        "to": { "type": "string", "pattern": "^(/|https://)" },
+        "text": { "description": "Visible text; defaults to label.", "type": "string" },
+        "external": { "description": "Cross-origin target. Requires navigate.external when not same-origin.", "type": "boolean", "default": false }
+      }
+    },
+
+    "Button": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "label", "on_press"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Button" },
+        "text": { "type": "string" },
+        "emphasis": { "enum": ["primary", "secondary", "plain"], "default": "secondary" },
+        "disabled": { "type": "boolean", "default": false },
+        "on_press": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Form": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "label", "on_submit", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Form" },
+        "on_submit": { "description": "Receives all named field values as args.", "$ref": "#/$defs/actionRef" },
+        "children": { "$ref": "#/$defs/children" }
+      }
+    },
+
+    "Input": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "name", "kind", "label"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Input" },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "kind": { "enum": ["text", "multiline", "email", "tel", "url", "number", "password", "date", "time", "search", "one_time_code"] },
+        "value": { "type": "string" },
+        "placeholder": { "type": "string" },
+        "required": { "type": "boolean", "default": false },
+        "sensitive": { "description": "Excluded from analytics, session replay and logs.", "type": "boolean", "default": false },
+        "autocomplete": { "description": "Hint for host autofill.", "type": "string" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "max_length": { "type": "integer", "minimum": 1 },
+        "on_change": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Select": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "name", "label", "options"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Select" },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["value", "text"],
+            "additionalProperties": false,
+            "properties": { "value": { "type": "string" }, "text": { "type": "string" } }
+          }
+        },
+        "value": { "type": "string" },
+        "required": { "type": "boolean", "default": false },
+        "on_change": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Checkbox": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "name", "label"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Checkbox" },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "checked": { "type": "boolean", "default": false },
+        "on_change": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "List": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "children"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "List" },
+        "ordered": { "type": "boolean", "default": false },
+        "children": { "$ref": "#/$defs/children" }
+      }
+    },
+
+    "Table": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "label", "columns", "rows"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Table" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["key", "title"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string" },
+              "title": { "type": "string" },
+              "align": { "enum": ["start", "center", "end"], "default": "start" },
+              "sortable": { "type": "boolean", "default": false }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+          }
+        },
+        "on_sort": { "$ref": "#/$defs/actionRef" },
+        "on_row_press": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Image": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "src", "alt"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Image" },
+        "src": {
+          "description": "Asset hash, or https URL.",
+          "type": "string",
+          "pattern": "^(sha256-[A-Za-z0-9_-]{43}|https://.+)$"
+        },
+        "alt": {
+          "description": "Required text alternative. Use an empty string only with decorative=true.",
+          "type": "string"
+        },
+        "decorative": { "type": "boolean", "default": false },
+        "fit": { "enum": ["contain", "cover", "fill"], "default": "contain" }
+      },
+      "if": { "properties": { "alt": { "const": "" } } },
+      "then": { "required": ["decorative"], "properties": { "decorative": { "const": true } } }
+    },
+
+    "Media": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "kind", "src", "label"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Media" },
+        "kind": { "enum": ["audio", "video"] },
+        "src": { "type": "string", "pattern": "^(sha256-[A-Za-z0-9_-]{43}|https://.+)$" },
+        "captions": { "description": "Captions/transcript asset. Required for video unless decorative.", "type": "string" },
+        "autoplay": { "description": "Hosts ignore autoplay with sound unless the user has opted in.", "type": "boolean", "default": false },
+        "controls": { "type": "boolean", "default": true }
+      }
+    },
+
+    "Canvas": {
+      "description": "Immediate-mode GPU surface (games, charts, editors). Opaque to the host, so it must supply an accessible name, a text description, and optionally a semantic mirror.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "label", "description"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Canvas" },
+        "surface": { "description": "Surface handle granted via gpu.surface.", "type": "string" },
+        "mirror": {
+          "description": "Optional accessible subtree describing canvas contents (e.g. inventory slots, nearby players). Not painted; exposed to assistive tech and agents.",
+          "$ref": "#/$defs/children"
+        },
+        "on_input": { "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "AdSlot": {
+      "description": "Filled and rendered by the host in an isolated surface. The app never sees the creative and cannot hide the disclosure.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "format", "placement"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "AdSlot" },
+        "format": { "enum": ["banner", "native", "video", "rewarded"] },
+        "placement": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" },
+        "categories_blocked": { "type": "array", "items": { "type": "string" } },
+        "on_reward": { "description": "Dispatched with a signed reward token (format=rewarded).", "$ref": "#/$defs/actionRef" }
+      }
+    },
+
+    "Embed": {
+      "description": "A sandboxed, hash-pinned third-party component (maps, chat, video players). Replaces <iframe>.",
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "type": "object",
+      "required": ["type", "provider", "label"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "Embed" },
+        "provider": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "props": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    }
+  }
+}

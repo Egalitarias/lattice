@@ -1,0 +1,33 @@
+{
+  "title": "Order 42",
+  "lang": "en",
+  "live": "status",
+  "root": {
+    "type": "Stack", "gap": "md", "padding": "lg",
+    "children": [
+      { "type": "Region", "role": "banner", "label": "Site header", "children": [
+        { "type": "Stack", "axis": "horizontal", "justify": "between", "children": [
+          { "type": "Heading", "level": 1, "text": "Order 42" },
+          { "type": "Link", "to": "/", "label": "Back to shop" }
+        ]}
+      ]},
+      { "type": "Region", "role": "main", "label": "Order details", "children": [
+        { "type": "Image", "src": "sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "alt": "A blue ceramic mug" },
+        { "type": "Table", "label": "Items in this order",
+          "columns": [ { "key": "item", "title": "Item" }, { "key": "qty", "title": "Qty", "align": "end" }, { "key": "price", "title": "Price", "align": "end" } ],
+          "rows": [ { "item": "Mug", "qty": 2, "price": "$18.00" } ] },
+        { "type": "Text", "id": "status", "text": "Status: shipped", "tone": "positive" },
+        { "type": "Button", "label": "Reorder", "text": "Reorder", "emphasis": "primary",
+          "on_press": { "action": "reorder", "args": { "order_id": "42" } } },
+        { "type": "Form", "label": "Leave a note", "on_submit": { "action": "add_note", "args": { "order_id": "42" } }, "children": [
+          { "type": "Input", "name": "note", "kind": "multiline", "label": "Note", "max_length": 500 },
+          { "type": "Checkbox", "name": "notify", "label": "Email me updates", "checked": true },
+          { "type": "Button", "label": "Save note", "text": "Save", "on_press": { "action": "add_note" } }
+        ]}
+      ]},
+      { "type": "Region", "role": "complementary", "label": "Sponsored", "children": [
+        { "type": "AdSlot", "format": "banner", "placement": "order.sidebar" }
+      ]}
+    ]
+  }
+}

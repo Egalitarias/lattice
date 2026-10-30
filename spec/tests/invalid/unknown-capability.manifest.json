@@ -1,0 +1,2 @@
+{ "lattice": "0.1", "app": "a.example.com", "version": "1.0.0", "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": { "/": "Home" }, "capabilities": { "requires": ["root.access"] } }
