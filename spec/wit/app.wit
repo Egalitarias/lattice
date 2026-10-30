@@ -8,6 +8,7 @@ package lattice:app@0.1.0;
 interface lifecycle {
     use types.{args, app-error};
     use scene.{scene, update, node-id};
+    use session.{info as session-info};
 
     enum color-scheme { light, dark }
 
@@ -24,6 +25,8 @@ interface lifecycle {
         online: bool,
         /// Manifest capability names the host actually granted (`requires` plus accepted `optional`).
         granted: list<string>,
+        /// Issuers from the manifest's `auth.providers` (type oidc) that `auth.sign-in-oidc` accepts.
+        oidc-issuers: list<string>,
     }
 
     record route-request {
@@ -81,6 +84,9 @@ interface lifecycle {
         /// Capability name. Calls using it now fail with `capability-revoked`.
         capability-revoked(string),
         locale-changed(string),
+        /// The session changed without the app asking (sign-out from the host's own chrome, expiry).
+        /// Sign-ins the app starts are reported by the call's own return value instead.
+        session-changed(session-info),
     }
 
     /// Called once, before any other export. A failure aborts launch with a host error view.

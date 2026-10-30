@@ -12,6 +12,8 @@ export const CAPABILITY_IMPORTS = {
   "lattice:app/log": null, // always available
   "lattice:app/storage": ["storage.local", "storage.sync"],
   "lattice:app/rpc": ["net.origin", "net.realtime"],
+  "lattice:app/session": ["session"],
+  "lattice:app/auth": ["auth.oidc", "auth.passkey"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
@@ -22,10 +24,10 @@ export function hostError(tag, val) {
 }
 
 /**
- * @param rpcCall  (method, Uint8Array) => result; blocks until the host answers. Only provided when
- *                 the app has an API.
+ * @param hostCall (kind, payload) => { ok, bytes } | { ok: false, error }; blocks until the host answers.
+ *                 Provided when the app has an API, a session or auth.
  */
-export function hostImports({ granted, origin, dataDir, onLog, rpcCall }) {
+export function hostImports({ granted, origin, dataDir, onLog, hostCall }) {
   const imports = {};
 
   imports["lattice:app/log"] = {
@@ -69,21 +71,53 @@ export function hostImports({ granted, origin, dataDir, onLog, rpcCall }) {
     };
   }
 
-  if (rpcCall && ["net.origin", "net.realtime"].some((c) => granted.has(c))) {
+  /** Unwrap a host-call result: bytes on success, otherwise throw the WIT error carried in the result. */
+  const unwrap = (r) => {
+    if (r.ok) return r.bytes;
+    const err = new Error(`host call failed: ${r.error.tag}`);
+    err.payload = r.error; // rpc-error for rpc calls, host-error for the rest (see apphost.mjs)
+    throw err;
+  };
+  const json = (bytes) => JSON.parse(Buffer.from(bytes).toString("utf8"));
+  const sessionInfo = (bytes) => {
+    const i = json(bytes);
+    return { signedIn: i.signedIn, subject: i.subject ?? undefined, expiresAt: i.expiresAt == null ? undefined : BigInt(i.expiresAt) };
+  };
+  const need = (cap) => {
+    if (!granted.has(cap)) throw hostError("capability-denied", cap);
+  };
+
+  if (hostCall && ["net.origin", "net.realtime"].some((c) => granted.has(c))) {
     imports["lattice:app/rpc"] = {
-      call(method, request) {
-        const r = rpcCall(method, request);
-        if (r.ok) return r.bytes;
-        const e = r.error;
-        // WIT: rpc-error = host(host-error) | application(application-error) | transport(string)
-        const err = new Error(`rpc ${e.tag}`);
-        err.payload = e;
-        throw err;
-      },
+      call: (method, request) => unwrap(hostCall("rpc", { method, request })),
       subscribe() {
         throw hostError("unavailable", "streaming is not implemented in this Lattice Navigator");
       },
       unsubscribe() {},
+    };
+  }
+
+  if (hostCall && granted.has("session")) {
+    imports["lattice:app/session"] = {
+      current: () => sessionInfo(unwrap(hostCall("session-current"))),
+      signOut: () => void unwrap(hostCall("session-sign-out")),
+    };
+  }
+
+  if (hostCall && (granted.has("auth.oidc") || granted.has("auth.passkey"))) {
+    imports["lattice:app/auth"] = {
+      signInOidc(issuer) {
+        need("auth.oidc");
+        return sessionInfo(unwrap(hostCall("oidc", { issuer })));
+      },
+      passkeyCreate(options) {
+        need("auth.passkey");
+        return unwrap(hostCall("passkey", { flow: "create", options }));
+      },
+      passkeyAssert(options) {
+        need("auth.passkey");
+        return unwrap(hostCall("passkey", { flow: "assert", options }));
+      },
     };
   }
 

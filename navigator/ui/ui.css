@@ -72,3 +72,13 @@ th, td { border-bottom: 1px solid var(--line); padding: var(--s-xs) var(--s-sm);
 .placeholder { border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--s-sm); color: var(--muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 img, video { max-width: 100%; }
+
+/* Host chrome and the sign-in dialog: drawn by Lattice Navigator, never by the app. */
+#chrome { position: sticky; top: 0; z-index: 9; padding: var(--s-xs) var(--s-md); background: var(--surface);
+  border-bottom: 1px solid var(--line); font-size: .875rem; display: flex; align-items: center; gap: var(--s-xs); flex-wrap: wrap; }
+#chrome button { padding: 0 var(--s-xs); font-size: inherit; }
+dialog#auth { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--fg);
+  padding: var(--s-lg); max-width: 28rem; }
+dialog#auth::backdrop { background: rgb(0 0 0 / .45); }
+dialog#auth h2 { margin: 0 0 var(--s-sm); }
+dialog#auth p { margin: 0 0 var(--s-md); }

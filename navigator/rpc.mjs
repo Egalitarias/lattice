@@ -21,23 +21,93 @@ const host = (tag, val) => ({ ok: false, error: { tag: "host", val: { tag, val }
 const transport = (msg) => ({ ok: false, error: { tag: "transport", val: msg } });
 const application = (code, message, details) => ({ ok: false, error: { tag: "application", val: { code, message, details } } });
 
-/** A random, opaque, per-origin token that the host attaches to RPC calls. Apps never see it. */
-export class SessionStore {
-  constructor(dir, origin) {
-    this.file = join(dir, "sessions", origin.replace(/[^A-Za-z0-9.-]/g, "_") + ".json");
+const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
+const MAX_SESSION_SECONDS = 30 * 24 * 3600;
+
+/**
+ * Validate a Lattice-Set-Session header value (spec/auth.md). Returns the session or null.
+ * Anything outside the limits is ignored rather than clamped: a server that sends it is broken.
+ */
+export function parseSetSession(value, nowSec = Math.floor(Date.now() / 1000)) {
+  if (typeof value !== "string" || value.length > 2048) return null;
+  let s;
+  try {
+    s = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    return null;
   }
-  token() {
+  if (!s || typeof s !== "object") return null;
+  if (typeof s.token !== "string" || !TOKEN_RE.test(s.token)) return null;
+  if (typeof s.subject !== "string" || s.subject.length < 1 || s.subject.length > 256) return null;
+  if (s.name !== undefined && (typeof s.name !== "string" || s.name.length > 80)) return null;
+  if (!Number.isInteger(s.expires) || s.expires <= nowSec || s.expires > nowSec + MAX_SESSION_SECONDS) return null;
+  return { token: s.token, subject: s.subject, name: s.name, expires: s.expires };
+}
+
+/**
+ * The host's session for one origin: an opaque token, plus who it belongs to once the server has
+ * signed the user in. Apps never see the token. Persisted per origin.
+ */
+export class SessionStore {
+  constructor(dir, origin, { now = () => Date.now() } = {}) {
+    this.file = join(dir, "sessions", origin.replace(/[^A-Za-z0-9.-]/g, "_") + ".json");
+    this.now = now;
+  }
+  #read() {
     if (existsSync(this.file)) {
-      try { return JSON.parse(readFileSync(this.file, "utf8")).token; } catch { /* regenerate */ }
+      try {
+        const s = JSON.parse(readFileSync(this.file, "utf8"));
+        if (typeof s.token === "string" && TOKEN_RE.test(s.token)) return s;
+      } catch { /* fall through to a fresh anonymous session */ }
     }
     return this.rotate();
   }
-  rotate() {
-    const token = randomBytes(32).toString("base64url");
+  #write(s) {
     mkdirSync(join(this.file, ".."), { recursive: true });
-    writeFileSync(this.file, JSON.stringify({ token }), { mode: 0o600 });
-    return token;
+    writeFileSync(this.file, JSON.stringify(s), { mode: 0o600 });
+    return s;
   }
+  /** The token to send. An expired signed-in session is replaced by a fresh anonymous one. */
+  token() {
+    return this.#current().token;
+  }
+  #current() {
+    const s = this.#read();
+    if (s.subject && s.expires <= Math.floor(this.now() / 1000)) return this.rotate();
+    return s;
+  }
+  info() {
+    const s = this.#current();
+    return { signedIn: !!s.subject, subject: s.subject, name: s.name, expiresAt: s.subject ? s.expires : undefined };
+  }
+  /** Install a session the server issued (already validated by parseSetSession). */
+  set(session) {
+    this.#write({ token: session.token, subject: session.subject, name: session.name, expires: session.expires });
+  }
+  /** Replace the session with a fresh anonymous one. */
+  rotate() {
+    return this.#write({ token: randomBytes(32).toString("base64url") });
+  }
+}
+
+/**
+ * Apply the session-changing headers of a 200 response to the store. Returns true if the session
+ * changed. The headers are consumed here; nothing downstream sees them.
+ */
+export function applySessionHeaders(store, headers) {
+  if (!store) return false;
+  const set = headers.get("lattice-set-session");
+  if (set !== null) {
+    const parsed = parseSetSession(set, Math.floor(store.now() / 1000));
+    if (!parsed) return false;
+    store.set(parsed);
+    return true;
+  }
+  if (headers.get("lattice-clear-session") !== null) {
+    store.rotate();
+    return true;
+  }
+  return false;
 }
 
 export class RpcClient {
@@ -139,6 +209,7 @@ export class RpcClient {
       if (!m.validateResponse(value)) {
         return transport(`response violates the API description for ${method}: ${this.ajv.errorsText(m.validateResponse.errors, { separator: "; " })}`);
       }
+      applySessionHeaders(this.session, res.headers); // only after the response passed validation
       return ok(bytes);
     }
 

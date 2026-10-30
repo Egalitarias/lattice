@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { fetchApp, prepareComponent, LoadError } from "./runtime.mjs";
 import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
 import { RpcClient, SessionStore } from "./rpc.mjs";
+import { AuthBroker } from "./auth.mjs";
 import { CAPABILITY_IMPORTS } from "./host.mjs";
 import { SceneStore, SceneError, toArgs, argsObject } from "./scene.mjs";
 
@@ -130,6 +131,7 @@ class Session {
       textScale: 1,
       online: true,
       granted: [...(this.manifest.capabilities?.requires ?? []), ...(this.manifest.capabilities?.optional ?? [])],
+      oidcIssuers: (this.manifest.auth?.providers ?? []).filter((p) => p.type === "oidc").map((p) => p.issuer),
     });
   }
 
@@ -194,6 +196,22 @@ class Session {
     );
   }
 
+  /** Deliver a host-initiated event (not a reply to an app call) and apply the app's update. */
+  event(event) {
+    return this.serial(() =>
+      this.#call(async () => {
+        const update = await this.host.call("onEvent", event);
+        try {
+          this.store.apply(update);
+        } catch (e) {
+          if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
+          throw e;
+        }
+        return { focus: update.focus };
+      })
+    );
+  }
+
   snapshot(focus) {
     const s = this.store;
     return { kind: "scene", path: this.path, title: s.title, lang: s.lang, live: s.live, focus, tree: s.tree() };
@@ -218,13 +236,13 @@ const SHELL_CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-async function readJson(req) {
+async function readJson(req, max = 64 * 1024) {
   if (!/^application\/json\b/.test(req.headers["content-type"] ?? "")) throw new HttpError(415, "expected application/json");
   let size = 0;
   const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > 64 * 1024) throw new HttpError(413, "request too large");
+    if (size > max) throw new HttpError(413, "request too large");
     chunks.push(c);
   }
   try {
@@ -234,24 +252,41 @@ async function readJson(req) {
   }
 }
 
-export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), log = defaultLog, watchdogMs, rpcTimeoutMs }) {
-  const cacheDir = join(dataDir, "cache");
-  const { url: appUrl, manifest, wasm, api } = await fetchApp(url, { dev });
-  const origin = manifest.app;
+const CALLBACK_PAGE = (message) =>
+  `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lattice Navigator</title><body><main><h1>Lattice Navigator</h1><p>${message}</p></main>`;
+
+export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs }) {
+  const { url: appUrl, manifest, wasm, api, tokenEndpoint } = await fetchApp(url, { dev });
+  const domain = manifest.app;
   const entryJs = await prepareComponent({ manifest, wasm, cacheDir });
 
   const granted = new Set([...(manifest.capabilities?.requires ?? []), ...(manifest.capabilities?.optional ?? [])]);
+  const wantsAuth = ["session", "auth.oidc", "auth.passkey"].some((c) => granted.has(c));
+
+  // Browser windows connected to this Navigator.
+  const clients = new Set();
+  const send = (res, msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
+  const broadcast = (msg) => clients.forEach((c) => send(c, msg));
+
+  // The page the user is looking at is served from the app's own domain when that is a *.localhost
+  // name, so a browser accepts it as the relying party for passkeys. Otherwise from 127.0.0.1.
+  const uiHost = domain.endsWith(".localhost") ? domain : "127.0.0.1";
+  let boundPort;
+  const uiOrigin = () => `http://${uiHost}:${boundPort}`;
+
+  const sessionStore = wantsAuth ? new SessionStore(dataDir, domain) : null;
+  const auth = sessionStore ? new AuthBroker({ manifest, tokenEndpoint, session: sessionStore, uiOrigin, broadcast, dev, timeoutMs: authTimeoutMs }) : null;
   const rpc = api
     ? new RpcClient({
         endpoint: api.endpoint,
         description: api.description,
         apiHash: api.hash,
-        session: granted.has("session") ? new SessionStore(dataDir, origin) : null,
+        session: granted.has("session") ? sessionStore : null,
         timeoutMs: rpcTimeoutMs,
       })
     : null;
 
-  const host = new AppHost({ entryJs, granted, origin, dataDir: join(dataDir, "data"), rpc, onLog: log, watchdogMs });
+  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, onLog: log, watchdogMs });
   try {
     await host.start();
   } catch (e) {
@@ -263,7 +298,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     }
     throw e;
   }
-  const session = new Session(host, manifest, origin, log);
+  const session = new Session(host, manifest, domain, log);
   await session.init();
 
   const startPath = appUrl.pathname || "/";
@@ -276,14 +311,26 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     if (startPath !== "/") await session.route("/").then(() => (lastError = null)).catch(() => {});
   }
 
-  const clients = new Set();
-  const send = (res, msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
-  const broadcast = (msg) => clients.forEach((c) => send(c, msg));
-  const current = (focus) => (lastError && !session.store.root ? { kind: "error", message: lastError } : session.snapshot(focus));
+  /** What the host itself draws around the app: who the page belongs to and who is signed in. */
+  const chrome = () => {
+    const i = sessionStore?.info();
+    return {
+      app: { name: manifest.name ?? domain, domain },
+      session: i ? { signedIn: i.signedIn, name: i.name ?? null } : null,
+      auth: auth ? auth.list() : [],
+    };
+  };
+  const snap = (focus) => ({ ...session.snapshot(focus), chrome: chrome() });
+  const current = (focus) => (lastError && !session.store.root ? { kind: "error", message: lastError, chrome: chrome() } : snap(focus));
+
+  const ok = (res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end("{}");
+  };
 
   const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, "http://x");
-    const allowedHosts = new Set([`127.0.0.1:${server.address().port}`, `localhost:${server.address().port}`]);
+    const allowedHosts = new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `${uiHost}:${boundPort}`]);
     try {
       if (!allowedHosts.has(req.headers.host ?? "")) throw new HttpError(421, "wrong host");
       res.setHeader("X-Content-Type-Options", "nosniff");
@@ -308,26 +355,33 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
         return void res.end(JSON.stringify(current()));
       }
 
+      // The identity provider sends the user's browser back here. There is no X-Navigator header on a
+      // redirect; the single-use `state` value is what binds this request to one pending sign-in.
+      if (req.method === "GET" && u.pathname === "/_navigator/auth/callback" && auth) {
+        const r = auth.callback(u.searchParams);
+        res.writeHead(r.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
+        return void res.end(CALLBACK_PAGE(r.message));
+      }
+
       if (req.method === "POST" && u.pathname.startsWith("/_navigator/")) {
         // Custom header forces a CORS preflight, which cross-site pages cannot pass.
         if (req.headers["x-navigator"] !== "1") throw new HttpError(403, "missing X-Navigator header");
-        const origin = req.headers.origin;
-        if (origin && !allowedHosts.has(new URL(origin).host)) throw new HttpError(403, "cross-origin request");
-        const body = await readJson(req);
+        const fromOrigin = req.headers.origin;
+        if (fromOrigin && !allowedHosts.has(new URL(fromOrigin).host)) throw new HttpError(403, "cross-origin request");
+        const body = await readJson(req, u.pathname === "/_navigator/auth/result" ? 256 * 1024 : undefined);
 
         if (u.pathname === "/_navigator/route") {
           if (typeof body.path !== "string" || !body.path.startsWith("/")) throw new HttpError(400, "bad path");
           try {
             await session.route(body.path);
             lastError = null;
-            broadcast(session.snapshot());
+            broadcast(snap());
           } catch (e) {
             if (!(e instanceof HttpError)) throw e;
             broadcast({ kind: "notice", message: e.message });
             throw e;
           }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          return void res.end("{}");
+          return ok(res);
         }
 
         if (u.pathname === "/_navigator/act") {
@@ -338,14 +392,40 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
           if (!Number.isInteger(body.source)) throw new HttpError(400, "bad source");
           try {
             const { focus } = await session.act(body.source, String(body.event), values);
-            broadcast(session.snapshot(focus));
+            broadcast(snap(focus));
           } catch (e) {
             if (!(e instanceof HttpError)) throw e;
             broadcast({ kind: "notice", message: e.message });
             throw e;
           }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          return void res.end("{}");
+          return ok(res);
+        }
+
+        // The user's answer to a host-drawn passkey prompt, or a cancel.
+        if (u.pathname === "/_navigator/auth/result" && auth) {
+          if (typeof body.id !== "string") throw new HttpError(400, "bad id");
+          if (!auth.finishPasskey(body.id, body)) throw new HttpError(404, "no such sign-in request");
+          return ok(res);
+        }
+        if (u.pathname === "/_navigator/auth/cancel" && auth) {
+          if (typeof body.id !== "string") throw new HttpError(400, "bad id");
+          auth.cancel(body.id);
+          return ok(res);
+        }
+
+        // Sign out, from the host's own chrome. The app is told afterwards and updates itself.
+        if (u.pathname === "/_navigator/signout" && auth) {
+          try {
+            await auth.signOut();
+            const i = sessionStore.info();
+            await session.event({ tag: "session-changed", val: { signedIn: i.signedIn, subject: i.subject, expiresAt: undefined } });
+            broadcast(snap());
+          } catch (e) {
+            if (!(e instanceof HttpError)) throw e;
+            broadcast({ kind: "notice", message: e.message });
+            throw e;
+          }
+          return ok(res);
         }
         throw new HttpError(404, "no such endpoint");
       }
@@ -364,13 +444,17 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     }
   });
 
-  await new Promise((ok) => server.listen(port, "127.0.0.1", ok));
+  await new Promise((done) => server.listen(port, "127.0.0.1", done));
+  boundPort = server.address().port;
   return {
-    port: server.address().port,
+    port: boundPort,
+    uiOrigin: uiOrigin(),
     manifest,
     session,
     host,
-    close: () => new Promise((ok) => { host.kill(); clients.forEach((c) => c.end()); server.close(ok); server.closeAllConnections?.(); }),
+    auth,
+    sessionStore,
+    close: () => new Promise((done) => { auth?.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }),
   };
 }
 
@@ -398,7 +482,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   try {
     const nav = await startNavigator(opts);
     console.log(`navigator: running ${nav.manifest.name ?? nav.manifest.app} (${nav.manifest.entry})`);
-    console.log(`navigator: open http://127.0.0.1:${nav.port}${new URL(opts.url).pathname}`);
+    console.log(`navigator: open ${nav.uiOrigin}${new URL(opts.url).pathname}`);
   } catch (e) {
     if (e instanceof LoadError) {
       console.error(`navigator: ${e.message}`);

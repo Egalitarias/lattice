@@ -1,10 +1,11 @@
-// Main-thread owner of the component's worker. Serves its RPC calls, forwards its logs, and kills
-// it if a call into the component takes too long.
+// Main-thread owner of the component's worker. Serves its host calls (RPC, session, sign-in),
+// forwards its logs, and kills it if it stops responding.
 
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { MAX_BODY } from "./rpc.mjs";
+import { AuthFailure } from "./auth.mjs";
 
 const workerFile = join(dirname(fileURLToPath(import.meta.url)), "app-worker.mjs");
 
@@ -17,6 +18,8 @@ export class ComponentError extends Error {
 export class HostCrash extends Error {}
 export class LinkFailure extends Error {}
 
+const jsonBytes = (v) => Buffer.from(JSON.stringify(v), "utf8");
+
 export class AppHost {
   #worker = null;
   #pending = new Map();
@@ -27,10 +30,13 @@ export class AppHost {
    * @param opts.entryJs     transpiled component entry module
    * @param opts.granted     capability names the manifest grants
    * @param opts.rpc         RpcClient, or null if the app has no API
-   * @param opts.watchdogMs  longest a single call into the component may take
+   * @param opts.session     SessionStore, or null
+   * @param opts.auth        AuthBroker, or null
+   * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
+   *                         on a host call (the network, a person) does not count.
    */
-  constructor({ entryJs, granted, origin, dataDir, rpc, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, onLog, watchdogMs, debug });
+  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, onLog, watchdogMs, debug });
   }
 
   async start() {
@@ -41,7 +47,7 @@ export class AppHost {
         origin: this.origin,
         dataDir: this.dataDir,
         sab: this.#sab,
-        hasApi: !!this.rpc,
+        hasHost: !!(this.rpc || this.session || this.auth),
         debug: this.debug,
       },
       // The component gets no environment and no stdio of its own.
@@ -72,7 +78,7 @@ export class AppHost {
 
   #onMessage(m) {
     if (m.type === "log") return void this.onLog?.(m.level, m.message);
-    if (m.type === "rpc") return void this.#serveRpc(m);
+    if (m.type === "host") return void this.#serveHostCall(m);
     const p = this.#pending.get(m.id);
     if (!p) return;
     this.#pending.delete(m.id);
@@ -82,16 +88,32 @@ export class AppHost {
     else p.reject(new Error(m.message));
   }
 
+  /** (Re)start the watchdog for the call in flight. */
+  #arm(id) {
+    const p = this.#pending.get(id);
+    if (!p) return;
+    clearTimeout(p.timer);
+    p.timer = setTimeout(() => {
+      this.#pending.delete(id);
+      this.kill();
+      p.reject(new HostCrash(`component did not respond within ${this.watchdogMs} ms and was stopped`));
+    }, this.watchdogMs);
+  }
+
   /** Answer a blocked worker. Always writes a reply, or the worker would wait for its timeout. */
-  async #serveRpc({ method, request }) {
+  async #serveHostCall(m) {
+    // The component is waiting on us, not running: its watchdog pauses until we answer.
+    for (const p of this.#pending.values()) clearTimeout(p.timer);
+
     let r;
     try {
-      r = this.rpc ? await this.rpc.call(method, request) : { ok: false, error: { tag: "host", val: { tag: "capability-denied", val: "rpc" } } };
+      r = await this.#dispatchHostCall(m);
     } catch (e) {
-      r = { ok: false, error: { tag: "transport", val: `host error: ${e.message}` } };
+      r = { ok: false, error: e instanceof AuthFailure ? e.hostError : m.kind === "rpc" ? { tag: "transport", val: `host error: ${e.message}` } : { tag: "internal", val: e.message } };
     }
+
     const ctrl = new Int32Array(this.#sab, 0, 4);
-    const payload = new Uint8Array(this.#sab, 16);
+    const out = new Uint8Array(this.#sab, 16);
     let bytes;
     let kind;
     if (r.ok) {
@@ -101,17 +123,41 @@ export class AppHost {
       kind = 2;
       const e = structuredClone(r.error);
       if (e.tag === "application") e.val.details = Buffer.from(e.val.details ?? []).toString("base64");
-      bytes = Buffer.from(JSON.stringify(e), "utf8");
+      bytes = jsonBytes(e);
     }
-    if (bytes.length > payload.length) {
+    if (bytes.length > out.length) {
       kind = 2;
-      bytes = Buffer.from(JSON.stringify({ tag: "transport", val: "response too large" }), "utf8");
+      bytes = jsonBytes(m.kind === "rpc" ? { tag: "transport", val: "response too large" } : { tag: "internal", val: "response too large" });
     }
-    payload.set(bytes);
+    out.set(bytes);
+    for (const id of this.#pending.keys()) this.#arm(id);
     Atomics.store(ctrl, 1, kind);
     Atomics.store(ctrl, 2, bytes.length);
     Atomics.store(ctrl, 0, 1);
     Atomics.notify(ctrl, 0);
+  }
+
+  async #dispatchHostCall(m) {
+    const denied = (what) => ({ ok: false, error: m.kind === "rpc" ? { tag: "host", val: { tag: "capability-denied", val: what } } : { tag: "capability-denied", val: what } });
+    const info = (i) => ({ signedIn: i.signedIn, subject: i.subject ?? null, expiresAt: i.expiresAt ?? null });
+    switch (m.kind) {
+      case "rpc":
+        return this.rpc ? this.rpc.call(m.method, m.request) : denied("net.origin");
+      case "session-current":
+        return this.session ? { ok: true, bytes: jsonBytes(info(this.session.info())) } : denied("session");
+      case "session-sign-out":
+        if (!this.auth) return denied("session");
+        await this.auth.signOut();
+        return { ok: true, bytes: new Uint8Array() };
+      case "oidc":
+        if (!this.auth) return denied("auth.oidc");
+        return { ok: true, bytes: jsonBytes(info(await this.auth.oidc(m.issuer))) };
+      case "passkey":
+        if (!this.auth) return denied("auth.passkey");
+        return { ok: true, bytes: await this.auth.passkey(m.flow, m.options) };
+      default:
+        return { ok: false, error: { tag: "invalid-argument", val: `unknown host call ${m.kind}` } };
+    }
   }
 
   /** Call a lifecycle export. Rejects with ComponentError (the app returned `err`) or HostCrash. */
@@ -119,12 +165,8 @@ export class AppHost {
     if (!this.#worker) return Promise.reject(new HostCrash("component is not running"));
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#pending.delete(id);
-        this.kill();
-        reject(new HostCrash(`component did not respond within ${this.watchdogMs} ms and was stopped`));
-      }, this.watchdogMs);
-      this.#pending.set(id, { resolve, reject, timer });
+      this.#pending.set(id, { resolve, reject, timer: null });
+      this.#arm(id);
       this.#worker.postMessage({ id, op, arg });
     });
   }

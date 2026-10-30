@@ -9,9 +9,13 @@
 // An app directory contains:
 //   manifest.json                     required
 //   target/wasm32-wasip2/release/*.wasm   the built component (exactly one)
-//   api.json + api.mjs                optional: API description and its handlers
+//   api.json + api.mjs                optional: API description and its handlers. api.mjs exports either
+//                                     `handlers`, or `setup({ manifest, oidc, dev, log })` returning
+//                                     `{ handlers, http }` where http maps absolute paths to (req, res)
+//                                     handlers (e.g. the manifest's auth.token_endpoint).
 //
 // Usage: node server.mjs --app ../examples/tasks [--port 8080] [--domain tasks.localhost]
+//                        [--oidc <issuer>,<client_id>[,<client_secret>]]... [--dev]
 
 import http from "node:http";
 import { createHash } from "node:crypto";
@@ -51,7 +55,7 @@ const schemaValidator = (name) => {
   };
 };
 
-export async function loadApp({ appDir, domain, log = console.error }) {
+export async function loadApp({ appDir, domain, oidc = [], dev = false, log = console.error }) {
   const wasm = readFileSync(findComponent(appDir));
   const blobs = new Map();
   const entry = hashOf(wasm);
@@ -60,8 +64,17 @@ export async function loadApp({ appDir, domain, log = console.error }) {
   const manifest = { ...JSON.parse(readFileSync(join(appDir, "manifest.json"), "utf8")), entry };
   if (domain) manifest.app = domain;
 
+  // OIDC providers come from server configuration and are advertised in the manifest.
+  if (oidc.length) {
+    manifest.auth = { ...manifest.auth, providers: [...(manifest.auth?.providers ?? [])] };
+    for (const p of oidc) {
+      manifest.auth.providers.push({ type: "oidc", issuer: p.issuer, client_id: p.clientId, scopes: ["openid", "profile"] });
+    }
+  }
+
   let rpc = null;
   let rpcPath = null;
+  let http = {};
   const apiFile = join(appDir, "api.json");
   if (existsSync(apiFile)) {
     const apiBytes = readFileSync(apiFile);
@@ -73,13 +86,15 @@ export async function loadApp({ appDir, domain, log = console.error }) {
     manifest.api = { ...manifest.api, schema: apiHash };
     rpcPath = new URL(manifest.api.url).pathname.replace(/\/$/, "");
     const mod = await import(pathToFileURL(join(appDir, "api.mjs")).href);
-    rpc = createRpc({ apiDescription, apiHash, handlers: mod.handlers, log });
+    const impl = mod.setup ? await mod.setup({ manifest, oidc, dev, log }) : { handlers: mod.handlers, http: mod.http };
+    http = impl.http ?? {};
+    rpc = createRpc({ apiDescription, apiHash, handlers: impl.handlers, log });
   } else if (manifest.api) {
     throw new Error("manifest.json declares an \"api\" but there is no api.json");
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath };
+  return { manifest, blobs, rpc, rpcPath, http };
 }
 
 const FALLBACK = (name) => `<!doctype html>
@@ -90,7 +105,7 @@ const FALLBACK = (name) => `<!doctype html>
 <code>Accept: ${MANIFEST_TYPE}</code>.</p>
 `;
 
-export function createServer({ manifest, blobs, rpc, rpcPath }) {
+export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {} }) {
   const cbor = Buffer.from(encode(manifest));
   return http.createServer((req, res) => {
     const url = new URL(req.url, "http://placeholder");
@@ -98,6 +113,11 @@ export function createServer({ manifest, blobs, rpc, rpcPath }) {
 
     res.setHeader("Vary", "Accept");
     res.setHeader("X-Content-Type-Options", "nosniff");
+
+    if (Object.hasOwn(routes, url.pathname)) {
+      res.setHeader("Cache-Control", "no-store");
+      return void routes[url.pathname](req, res);
+    }
 
     if (rpc && url.pathname.startsWith(rpcPath + "/")) {
       const method = url.pathname.slice(rpcPath.length + 1);
@@ -133,18 +153,23 @@ export function createServer({ manifest, blobs, rpc, rpcPath }) {
 }
 
 function args(argv) {
-  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined };
+  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--port") out.port = Number(argv[++i]);
     else if (argv[i] === "--app") out.app = resolve(argv[++i]);
     else if (argv[i] === "--domain") out.domain = argv[++i];
+    else if (argv[i] === "--dev") out.dev = true;
+    else if (argv[i] === "--oidc") {
+      const [issuer, clientId, clientSecret] = argv[++i].split(",");
+      out.oidc.push({ issuer, clientId, clientSecret });
+    }
   }
   return out;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const a = args(process.argv.slice(2));
-  const app = await loadApp({ appDir: a.app, domain: a.domain });
+  const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev });
   createServer(app).listen(a.port, "127.0.0.1", () => {
     console.log(`lattice server for ${app.manifest.app} on http://127.0.0.1:${a.port}`);
     console.log(`  entry ${app.manifest.entry}`);

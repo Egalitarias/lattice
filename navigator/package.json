@@ -7,12 +7,15 @@
   "license": "Apache-2.0",
   "scripts": {
     "start": "node navigator.mjs",
-    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs"
+    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs"
   },
   "dependencies": {
     "@bytecodealliance/jco": "^1.40.0",
     "@bytecodealliance/preview2-shim": "^0.17.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "jose": "^6.2.14"
   }
 }

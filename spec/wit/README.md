@@ -74,6 +74,9 @@ will round-trip scenes between the two forms.
 - A control's `on-change` receives only that control's value, keyed by its `name`.
 - The UI layer never sends action names or arguments. It reports "node N, event E, values V"; the host looks up the
   action reference it received from the app and rejects values for fields outside the node's form.
+- Sign-in is driven by the host (`auth`, `session`), never by the app: the component asks, the host draws the dialog,
+  and the session lives in the host. `host-event.session-changed` tells the app when the session changed without it
+  asking (for example sign-out from the host's own chrome), and `launch.oidc-issuers` lists the issuers it may use.
 - Re-sending a node with `set-node` re-asserts its props, including an input's `value` (this is how an app clears a
   field). Nodes the app does not touch keep their user-edited state.
 

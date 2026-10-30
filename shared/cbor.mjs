@@ -1,5 +1,5 @@
 // Minimal deterministic CBOR (RFC 8949 section 4.2) for the JSON data model plus byte strings.
-// Maps use string keys sorted by their encoded form (length first, then bytewise).
+// Objects use string keys; Maps may use integer keys. Keys are sorted by their encoded form (length first, then bytewise).
 // Floats are always encoded as 64-bit; integers use the shortest form.
 
 const enc = new TextEncoder();
@@ -50,6 +50,20 @@ function encodeInto(v, out) {
   if (Array.isArray(v)) {
     head(4, v.length, out);
     for (const x of v) encodeInto(x, out);
+    return;
+  }
+  if (v instanceof Map) {
+    // Maps allow integer keys (COSE, WebAuthn). Keys are ordered by their encoded form.
+    const entries = [...v.entries()].map(([k, x]) => {
+      const kb = [];
+      encodeInto(k, kb);
+      return { kb, x };
+    }).sort((p, q) => p.kb.length - q.kb.length || compareBytes(p.kb, q.kb));
+    head(5, entries.length, out);
+    for (const { kb, x } of entries) {
+      for (const byte of kb) out.push(byte);
+      encodeInto(x, out);
+    }
     return;
   }
   if (typeof v === "object") {

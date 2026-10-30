@@ -6,21 +6,46 @@
     "list_tasks": {
       "description": "All of the caller's tasks, oldest first.",
       "effect": "read",
-      "request": { "type": "object", "additionalProperties": false },
+      "request": {
+        "type": "object",
+        "additionalProperties": false
+      },
       "response": {
         "type": "object",
-        "required": ["tasks"],
+        "required": [
+          "tasks"
+        ],
         "additionalProperties": false,
-        "properties": { "tasks": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/task" } } },
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/$defs/task"
+            }
+          }
+        },
         "$defs": {
           "task": {
             "type": "object",
-            "required": ["id", "title", "done"],
+            "required": [
+              "id",
+              "title",
+              "done"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "integer", "minimum": 0 },
-              "title": { "type": "string", "maxLength": 200 },
-              "done": { "type": "boolean" }
+              "id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "done": {
+                "type": "boolean"
+              }
             }
           }
         }
@@ -31,31 +56,63 @@
       "effect": "write",
       "request": {
         "type": "object",
-        "required": ["title"],
+        "required": [
+          "title"
+        ],
         "additionalProperties": false,
-        "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 200 } }
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
       },
       "response": {
         "type": "object",
-        "required": ["task"],
+        "required": [
+          "task"
+        ],
         "additionalProperties": false,
-        "properties": { "task": { "$ref": "#/$defs/task" } },
+        "properties": {
+          "task": {
+            "$ref": "#/$defs/task"
+          }
+        },
         "$defs": {
           "task": {
             "type": "object",
-            "required": ["id", "title", "done"],
+            "required": [
+              "id",
+              "title",
+              "done"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "integer", "minimum": 0 },
-              "title": { "type": "string", "maxLength": 200 },
-              "done": { "type": "boolean" }
+              "id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "done": {
+                "type": "boolean"
+              }
             }
           }
         }
       },
       "errors": [
-        { "code": "title_blank", "description": "The title is empty after trimming." },
-        { "code": "too_many_tasks", "description": "The caller already has the maximum number of tasks." }
+        {
+          "code": "title_blank",
+          "description": "The title is empty after trimming."
+        },
+        {
+          "code": "too_many_tasks",
+          "description": "The caller already has the maximum number of tasks."
+        }
       ]
     },
     "set_done": {
@@ -63,41 +120,243 @@
       "effect": "write",
       "request": {
         "type": "object",
-        "required": ["id", "done"],
+        "required": [
+          "id",
+          "done"
+        ],
         "additionalProperties": false,
-        "properties": { "id": { "type": "integer", "minimum": 0 }, "done": { "type": "boolean" } }
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "done": {
+            "type": "boolean"
+          }
+        }
       },
       "response": {
         "type": "object",
-        "required": ["task"],
+        "required": [
+          "task"
+        ],
         "additionalProperties": false,
-        "properties": { "task": { "$ref": "#/$defs/task" } },
+        "properties": {
+          "task": {
+            "$ref": "#/$defs/task"
+          }
+        },
         "$defs": {
           "task": {
             "type": "object",
-            "required": ["id", "title", "done"],
+            "required": [
+              "id",
+              "title",
+              "done"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "integer", "minimum": 0 },
-              "title": { "type": "string", "maxLength": 200 },
-              "done": { "type": "boolean" }
+              "id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "done": {
+                "type": "boolean"
+              }
             }
           }
         }
       },
-      "errors": [{ "code": "task_not_found" }]
+      "errors": [
+        {
+          "code": "task_not_found"
+        }
+      ]
     },
     "delete_task": {
       "description": "Permanently delete a task.",
       "effect": "destructive",
       "request": {
         "type": "object",
-        "required": ["id"],
+        "required": [
+          "id"
+        ],
         "additionalProperties": false,
-        "properties": { "id": { "type": "integer", "minimum": 0 } }
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       },
-      "response": { "type": "object", "additionalProperties": false },
-      "errors": [{ "code": "task_not_found" }]
+      "response": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "errors": [
+        {
+          "code": "task_not_found"
+        }
+      ]
+    },
+    "profile": {
+      "description": "Who the caller is. Signed-out callers are anonymous.",
+      "effect": "read",
+      "request": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "signed_in",
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "signed_in": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      }
+    },
+    "passkey_register_begin": {
+      "description": "Start creating an account with a passkey. Returns WebAuthn creation options (JSON text).",
+      "effect": "write",
+      "request": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "options"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "options": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        }
+      },
+      "errors": [
+        {
+          "code": "invalid_name",
+          "description": "The account name is empty or too long."
+        }
+      ]
+    },
+    "passkey_register_finish": {
+      "description": "Finish creating an account. The response carries a new session for the host.",
+      "effect": "write",
+      "request": {
+        "type": "object",
+        "required": [
+          "response"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "response": {
+            "type": "string",
+            "maxLength": 65536
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      },
+      "errors": [
+        {
+          "code": "passkey_failed",
+          "description": "The passkey could not be verified."
+        }
+      ]
+    },
+    "passkey_login_begin": {
+      "description": "Start signing in with a passkey. Returns WebAuthn request options (JSON text).",
+      "effect": "write",
+      "request": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "options"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "options": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        }
+      }
+    },
+    "passkey_login_finish": {
+      "description": "Finish signing in. The response carries a new session for the host.",
+      "effect": "write",
+      "request": {
+        "type": "object",
+        "required": [
+          "response"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "response": {
+            "type": "string",
+            "maxLength": 65536
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      },
+      "errors": [
+        {
+          "code": "passkey_failed",
+          "description": "The passkey could not be verified."
+        }
+      ]
     }
   }
 }

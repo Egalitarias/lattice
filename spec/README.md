@@ -6,6 +6,7 @@
 | [`scene.schema.json`](scene.schema.json) | Scene tree: the UI an app hands to Lattice Navigator |
 | [`capabilities.md`](capabilities.md) | Capability catalog and rules |
 | [`api.schema.json`](api.schema.json), [`rpc.md`](rpc.md) | Typed RPC: the API description format and the wire protocol |
+| [`auth.md`](auth.md) | Authentication: sessions, `Lattice-Set-Session`, OIDC, passkeys, what the host and server each verify |
 | [`wit/`](wit/README.md) | Component interface (WIT): how an app and Lattice Navigator talk, and capabilities as imports |
 
 ## Conventions

@@ -108,7 +108,7 @@
             "additionalProperties": false,
             "properties": {
               "type": { "enum": ["passkey", "oidc"] },
-              "issuer": { "type": "string", "pattern": "^https://" },
+              "issuer": { "description": "https, or http on a loopback name for development (hosts only follow http issuers in development mode).", "type": "string", "pattern": "^(https://|http://(localhost|127\\.0\\.0\\.1|\\[::1\\]|[a-z0-9.-]+\\.localhost)(:[0-9]+)?(/|$))" },
               "client_id": { "type": "string" },
               "scopes": { "type": "array", "items": { "type": "string" } }
             },

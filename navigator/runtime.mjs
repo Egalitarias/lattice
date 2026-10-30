@@ -6,8 +6,8 @@
 //      each hash before using a byte of it.
 //   4. Transpile the component (jco), cached by hash. Instantiation happens in the worker.
 
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { transpile } from "@bytecodealliance/jco";
@@ -80,7 +80,16 @@ export async function fetchApp(url, { dev = false } = {}) {
     // The declared URL names the app's origin; we reach it at the address we fetched the manifest from.
     api = { description, hash: manifest.api.schema, endpoint: new URL(declared.pathname, u.origin).href };
   }
-  return { url: u, manifest, wasm, api };
+
+  let tokenEndpoint = null;
+  if (manifest.auth?.token_endpoint) {
+    const declared = new URL(manifest.auth.token_endpoint);
+    if (declared.hostname !== manifest.app) {
+      throw new LoadError(`auth.token_endpoint is on ${declared.hostname}, not the app's origin ${manifest.app}`);
+    }
+    tokenEndpoint = new URL(declared.pathname, u.origin).href;
+  }
+  return { url: u, manifest, wasm, api, tokenEndpoint };
 }
 
 async function fetchBlob(origin, hash) {
@@ -94,17 +103,27 @@ async function fetchBlob(origin, hash) {
   return bytes;
 }
 
-/** Transpile to JS + core wasm (cached by hash) and return the entry module path. */
+/**
+ * Transpile to JS + core wasm (cached by hash) and return the entry module path.
+ * The cache is content-addressed and written atomically, so concurrent processes can share it.
+ */
 export async function prepareComponent({ manifest, wasm, cacheDir }) {
   const outDir = join(cacheDir, manifest.entry.replace("sha256-", ""));
   const entryJs = join(outDir, "app.js");
-  if (!existsSync(entryJs)) {
-    const { files } = await transpile(wasm, { name: "app", instantiation: "async", noTypescript: true });
-    for (const [name, data] of Object.entries(files)) {
-      const p = join(outDir, name);
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, data);
-    }
+  if (existsSync(entryJs)) return entryJs;
+
+  const { files } = await transpile(wasm, { name: "app", instantiation: "async", noTypescript: true });
+  const tmp = `${outDir}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  for (const [name, data] of Object.entries(files)) {
+    const p = join(tmp, name);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, data);
   }
+  try {
+    renameSync(tmp, outDir); // all-or-nothing
+  } catch {
+    rmSync(tmp, { recursive: true, force: true }); // another process got there first
+  }
+  if (!existsSync(entryJs)) throw new LoadError("could not prepare the component");
   return entryJs;
 }

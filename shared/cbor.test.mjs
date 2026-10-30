@@ -38,3 +38,9 @@ test("rejects trailing bytes, duplicate keys, and indefinite lengths", () => {
   assert.throws(() => decode(Uint8Array.from([0xa2, 0x61, 0x61, 0x01, 0x61, 0x61, 0x02])));
   assert.throws(() => decode(Uint8Array.from([0x9f, 0xff])));
 });
+
+test("Map with integer keys encodes deterministically (COSE-style)", () => {
+  // {1: 2, 3: -7, -1: 1}  -> keys sorted by encoded form: 1, 3, -1
+  const m = new Map([[-1, 1], [3, -7], [1, 2]]);
+  assert.equal(hex(encode(m)), "a301020326" + "2001");
+});

@@ -274,6 +274,98 @@ function render(msg) {
   }
 }
 
+// ---- Host chrome -------------------------------------------------------------------------------
+// Drawn by Lattice Navigator, outside the app's tree: it says whose page this is and who is signed in,
+// so an app cannot claim either for itself.
+
+const chromeEl = document.getElementById("chrome");
+
+function renderChrome(c) {
+  if (!c) return;
+  const parts = [h("strong", {}, c.app.domain)];
+  if (c.session) {
+    parts.push(document.createTextNode(c.session.signedIn ? ` \u00b7 Signed in as ${c.session.name ?? "account"} ` : " \u00b7 Not signed in "));
+    if (c.session.signedIn) {
+      const out = h("button", { type: "button", "data-emphasis": "plain" }, "Sign out");
+      out.addEventListener("click", () => post("signout", {}));
+      parts.push(out);
+    }
+  }
+  chromeEl.replaceChildren(...parts);
+  chromeEl.hidden = false;
+  // A window that connects mid-flow still shows the pending prompt.
+  const pending = c.auth?.[0];
+  if (pending && activePrompt?.id !== pending.id) showAuth(pending);
+}
+
+// ---- Sign-in dialog ----------------------------------------------------------------------------
+// The text is composed here from the manifest's name and domain and the issuer's host. Nothing the
+// app supplied appears in it.
+
+const dialog = document.getElementById("auth");
+let activePrompt = null;
+
+function describe(p) {
+  const who = `${p.app.name} (${p.app.domain})`;
+  switch (p.flow) {
+    case "oidc":
+      return { title: `Sign in with ${p.issuerHost}`, text: `${who} wants to sign you in using ${p.issuerHost}. A new window will open on that site.` };
+    case "passkey-create":
+      return { title: "Create a passkey", text: `${who} wants to create a passkey on this device. It will only work for ${p.app.domain}.` };
+    default:
+      return { title: "Sign in with a passkey", text: `${who} wants you to sign in with a passkey for ${p.app.domain}.` };
+  }
+}
+
+function showAuth(p) {
+  activePrompt = p;
+  const d = describe(p);
+  const cont = h("button", { type: "button", "data-emphasis": "primary" }, "Continue");
+  const cancel = h("button", { type: "button" }, "Cancel");
+  const status = h("p", { role: "status", id: "auth-status" });
+  cont.addEventListener("click", () => proceed(p, cont, status));
+  cancel.addEventListener("click", cancelAuth);
+  dialog.replaceChildren(h("h2", { id: "auth-title" }, d.title), h("p", {}, d.text), status, h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }, ""));
+  dialog.lastChild.append(cont, cancel);
+  if (!dialog.open) dialog.showModal();
+  cont.focus();
+}
+
+function closeAuth(id) {
+  if (activePrompt && activePrompt.id === id) {
+    activePrompt = null;
+    if (dialog.open) dialog.close();
+  }
+}
+
+function cancelAuth() {
+  if (activePrompt) post("auth/cancel", { id: activePrompt.id });
+}
+dialog.addEventListener("cancel", (e) => { e.preventDefault(); cancelAuth(); });
+
+async function proceed(p, button, status) {
+  button.disabled = true;
+  if (p.flow === "oidc") {
+    // Opened on the user's click so the browser allows it; noopener keeps the provider's page from
+    // reaching back into this one.
+    window.open(p.url, "_blank", "noopener");
+    status.textContent = "Waiting for you to finish signing in in the other window\u2026";
+    return;
+  }
+  try {
+    const create = p.flow === "passkey-create";
+    if (!window.PublicKeyCredential || !PublicKeyCredential.parseCreationOptionsFromJSON) {
+      throw Object.assign(new Error("Passkeys are not supported by this browser."), { name: "NotSupportedError" });
+    }
+    const credential = create
+      ? await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(p.options) })
+      : await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(p.options) });
+    await post("auth/result", { id: p.id, ok: true, response: JSON.stringify(credential.toJSON()) });
+  } catch (e) {
+    await post("auth/result", { id: p.id, ok: false, error: e?.name ?? "Error" });
+  }
+}
+
 // ---- Boot -------------------------------------------------------------------------------------
 
 const events = new EventSource("/_navigator/events");
@@ -289,7 +381,10 @@ events.onmessage = (e) => {
     }
     first = false;
     render(msg);
+    renderChrome(msg.chrome);
   } else if (msg.kind === "notice") notice(msg.message);
-  else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); }
+  else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); renderChrome(msg.chrome); }
+  else if (msg.kind === "auth") showAuth(msg.prompt);
+  else if (msg.kind === "auth-end") closeAuth(msg.id);
 };
 addEventListener("popstate", () => navigate(location.pathname + location.search, { push: false }));

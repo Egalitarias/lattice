@@ -81,7 +81,8 @@ interface session {
 
     current: func() -> info;
 
-    /// Clears the host-held session and tells the server via `auth.token_endpoint` if declared.
+    /// Tells the server to revoke the session (`grant: revoke` at `auth.token_endpoint`, if declared),
+    /// then replaces the host-held session with a fresh anonymous one.
     sign-out: func();
 }
 
@@ -91,15 +92,21 @@ interface auth {
     use session.{info};
 
     /// Runs the OIDC authorization-code + PKCE flow for the manifest provider with this
-    /// `issuer`, then exchanges the code at `auth.token_endpoint`. The host holds the verifier;
-    /// the app never sees the code or tokens.
+    /// `issuer`, then sends the code to `auth.token_endpoint`, whose server verifies the ID token and
+    /// answers with a session (spec/auth.md). The host holds the verifier and the session; the app
+    /// never sees the code or any token. Blocks until the user finishes or cancels (`cancelled`).
+    /// Requires `auth.oidc`.
     sign-in-oidc: func(issuer: string) -> result<info, host-error>;
 
-    /// Creates a passkey. `options` is the server-issued WebAuthn creation options (JSON bytes).
-    /// Returns the attestation response (JSON bytes) for the app to send to its server.
+    /// Creates a passkey. `options` is the server-issued WebAuthn creation options (UTF-8 JSON, the
+    /// WebAuthn `PublicKeyCredentialCreationOptionsJSON`). The host requires `rp.id` to equal the app's
+    /// domain, drops extensions, and asks the user in its own dialog. Returns the registration
+    /// response (UTF-8 JSON) for the app to send to its server. Requires `auth.passkey`.
     passkey-create: func(options: list<u8>) -> result<list<u8>, host-error>;
 
-    /// Asserts with a passkey. `options` is the server-issued request options (JSON bytes).
+    /// Asserts with a passkey. `options` is the server-issued request options (UTF-8 JSON,
+    /// `PublicKeyCredentialRequestOptionsJSON`); `rpId`, if present, must equal the app's domain.
+    /// Returns the authentication response (UTF-8 JSON). Requires `auth.passkey`.
     passkey-assert: func(options: list<u8>) -> result<list<u8>, host-error>;
 }
 

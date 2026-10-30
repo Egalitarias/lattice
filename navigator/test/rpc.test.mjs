@@ -24,9 +24,18 @@ const apiBytes = readFileSync(join(tasksDir, "api.json"));
 const description = JSON.parse(apiBytes);
 const apiHash = hashOf(apiBytes);
 
+/** Handlers for every method in the API description; tests override the ones they care about. */
+const completeHandlers = (overrides = {}) => ({
+  ...Object.fromEntries(Object.keys(description.methods).map((m) => [m, async () => { throw new Error(`${m} is not used by this test`); }])),
+  ...overrides,
+});
+
 const listen = (server) => new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server.address().port)));
 const close = (server) => new Promise((ok) => { server.close(ok); server.closeAllConnections?.(); });
 const quiet = () => {};
+// Transpiled components are content-addressed, so every test can share one cache.
+const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = (n, pred) => (pred(n) ? n : n.children.map((c) => find(c, pred)).find(Boolean));
 const all = (n, pred, out = []) => (pred(n) && out.push(n), n.children.forEach((c) => all(c, pred, out)), out);
@@ -62,7 +71,15 @@ async function withTasks(fn, { dataDir, requires } = {}) {
   const origin = createServer(app);
   const originPort = await listen(origin);
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), "nav-rpc-"));
-  const nav = await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet });
+  let nav;
+  try {
+    nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet });
+  } catch (e) {
+    // Navigator refused to start (for example, the component could not be linked): clean up what we opened.
+    await close(origin);
+    if (!dataDir) rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
   const call = async (path, body) => {
     const res = await fetch(`http://127.0.0.1:${nav.port}${path}`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Navigator": "1" }, body: JSON.stringify(body),
@@ -96,7 +113,7 @@ test("tasks: add, toggle and delete go through typed RPC to the server", async (
     await call("/_navigator/act", { source: box.id, event: "change", values: { [box.props.name]: true } });
     s = await state();
     assert.equal(find(s.tree, (n) => n.type === "checkbox").props.checked, true);
-    assert.equal(find(s.tree, (n) => n.type === "text" && /task/.test(n.props.text)).props.text, "1 task, 1 done");
+    assert.equal(find(s.tree, (n) => n.type === "text" && /^\d+ tasks?, \d+ done$/.test(n.props.text)).props.text, "1 task, 1 done");
 
     assert.equal((await press("Delete")).status, 200);
     assert.equal(all((await state()).tree, (n) => n.type === "checkbox").length, 0);
@@ -116,18 +133,18 @@ test("tasks: state lives on the server, keyed by the host's session token", asyn
     await fetch(`http://127.0.0.1:${nav.port}/_navigator/act`, { method: "POST", headers: { "Content-Type": "application/json", "X-Navigator": "1" }, body: JSON.stringify({ source: b.id, event: "press", values: { title } }) });
   };
   try {
-    let a = await startNavigator({ url, dev: true, port: 0, dataDir: dir, log: quiet });
+    let a = await startNavigator({ cacheDir: SHARED_CACHE, url, dev: true, port: 0, dataDir: dir, log: quiet });
     await add(a, "Mine");
     await a.close();
 
     // Same profile (same session token): the server still has it.
-    a = await startNavigator({ url, dev: true, port: 0, dataDir: dir, log: quiet });
+    a = await startNavigator({ cacheDir: SHARED_CACHE, url, dev: true, port: 0, dataDir: dir, log: quiet });
     assert.deepEqual(await labels(a), ["Mine"]);
     await a.close();
 
     // A different profile is a different session and sees nothing.
     const other = mkdtempSync(join(tmpdir(), "nav-sess2-"));
-    const b = await startNavigator({ url, dev: true, port: 0, dataDir: other, log: quiet });
+    const b = await startNavigator({ cacheDir: SHARED_CACHE, url, dev: true, port: 0, dataDir: other, log: quiet });
     assert.deepEqual(await labels(b), []);
     await b.close();
     rmSync(other, { recursive: true, force: true });
@@ -146,12 +163,9 @@ test("tasks: a server-declared application error reaches the user as a message",
   });
 });
 
-test("session capability gates the session header: without it the server says unauthorized", async () => {
-  await withTasks(async ({ state }) => {
-    const s = await state();
-    assert.equal(s.kind, "error");
-    assert.equal(s.message, "Please sign in to continue.");
-  }, { requires: ["net.origin"] });
+test("an app that needs the session capability cannot run without it", async () => {
+  // The tasks component imports `session` and `auth`; a manifest that grants only net.origin cannot link them.
+  await assert.rejects(withTasks(async () => {}, { requires: ["net.origin"] }), /could not be linked/);
 });
 
 test("an app without net.origin cannot be linked to rpc", async () => {
@@ -161,24 +175,25 @@ test("an app without net.origin cannot be linked to rpc", async () => {
   const port = await listen(origin);
   const dir = mkdtempSync(join(tmpdir(), "nav-nolink-"));
   try {
-    await assert.rejects(startNavigator({ url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet }), /could not be linked/);
+    await assert.rejects(startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet }), /could not be linked/);
   } finally { await close(origin); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the host stays responsive while a component is blocked on a slow RPC", async () => {
   // A tasks origin whose add_task takes a while.
-  const handlers = {
+  const handlers = completeHandlers({
     list_tasks: async () => ({ tasks: [] }),
+    profile: async () => ({ signed_in: false, name: "" }),
     add_task: async ({ title }) => { await sleep(1500); return { task: { id: 1, title, done: false } }; },
     set_done: async () => { throw new ApiError("task_not_found", "no"); },
     delete_task: async () => { throw new ApiError("task_not_found", "no"); },
-  };
+  });
   const app = await loadApp({ appDir: tasksDir });
   const rpc = createRpc({ apiDescription: description, apiHash, handlers, log: quiet });
   const origin = createServer({ ...app, rpc });
   const port = await listen(origin);
   const dir = mkdtempSync(join(tmpdir(), "nav-slow-"));
-  const nav = await startNavigator({ url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet });
+  const nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet });
   try {
     const s = await fetch(`http://127.0.0.1:${nav.port}/_navigator/state`).then((r) => r.json());
     const add = find(s.tree, (n) => n.type === "button" && n.props.text === "Add");
@@ -413,12 +428,12 @@ test("server: validates requests and enforces the contract", async () => {
 
 test("server: a handler that breaks the contract produces a generic 500, not a leak", async () => {
   const logs = [];
-  const handlers = {
+  const handlers = completeHandlers({
     list_tasks: async () => ({ tasks: [{ id: 1, title: "x", done: false, secret: "do not leak" }] }), // extra field
     add_task: async () => { throw new ApiError("made_up_code", "undeclared"); },
     set_done: async () => { throw new Error("db password is hunter2"); },
     delete_task: async () => ({}),
-  };
+  });
   const rpc = createRpc({ apiDescription: description, apiHash, handlers, log: (m) => logs.push(m) });
   const app = await loadApp({ appDir: tasksDir });
   const origin = createServer({ ...app, rpc });
@@ -438,7 +453,7 @@ test("server: a handler that breaks the contract produces a generic 500, not a l
 
 test("server: refuses to start with a handler/description mismatch", () => {
   assert.throws(() => createRpc({ apiDescription: description, apiHash, handlers: { list_tasks: async () => ({}) } }), /has no handler/);
-  assert.throws(() => createRpc({ apiDescription: description, apiHash, handlers: { list_tasks() {}, add_task() {}, set_done() {}, delete_task() {}, extra() {} } }), /not in the API description/);
+  assert.throws(() => createRpc({ apiDescription: description, apiHash, handlers: completeHandlers({ extra() {} }) }), /not in the API description/);
 });
 
 // ---- Watchdog ------------------------------------------------------------------------------------
@@ -453,7 +468,7 @@ test("a component that hangs is killed by the watchdog and Lattice Navigator rec
     const entryJs = await prepareComponent({ manifest, wasm, cacheDir: join(dir, "cache") });
     const host = new AppHost({ entryJs, granted: new Set(["storage.local"]), origin: "todo.localhost", dataDir: join(dir, "data"), rpc: null, onLog: quiet, watchdogMs: 400, debug: true });
     await host.start();
-    const launch = { origin: "todo.localhost", locale: "en", colorScheme: "light", reducedMotion: false, textScale: 1, online: true, granted: [] };
+    const launch = { origin: "todo.localhost", locale: "en", colorScheme: "light", reducedMotion: false, textScale: 1, online: true, granted: [], oidcIssuers: [] };
     await host.call("init", launch);
 
     const t0 = Date.now();

@@ -1,8 +1,12 @@
-//! Lattice reference app: tasks backed by a server, over typed RPC.
+//! Lattice reference app: tasks backed by a server, over typed RPC, with sign-in.
 //!
 //! The component holds only a cache of what the server last said. Every change goes through
-//! `rpc.call`; the host validates requests and responses against the API description in `api.json`,
-//! so a response that reaches this code already has the right shape.
+//! `rpc.call`; the host validates requests and responses against the API description in `api.json`.
+//!
+//! Sign-in never touches a credential or a token here. The component asks the host to run a
+//! passkey ceremony or an OIDC flow, forwards the host's result to its server, and the server
+//! replies with a session that the host (not this code) keeps. The component learns who the user
+//! is by asking its server (`profile`).
 
 wit_bindgen::generate!({
     path: "../../spec/wit",
@@ -14,10 +18,12 @@ use std::cell::RefCell;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use exports::lattice::app::lifecycle::{ActionCall, Guest, HostEvent, Launch, RouteRequest};
+use lattice::app::auth;
 use lattice::app::log::{self, Level};
 use lattice::app::rpc::{self, RpcError};
 use lattice::app::scene::*;
-use lattice::app::types::{AppError, Scalar};
+use lattice::app::session;
+use lattice::app::types::{AppError, HostError, Scalar};
 
 // Fixed ids for the static parts of the home scene.
 const ROOT: NodeId = 1;
@@ -31,6 +37,16 @@ const SUMMARY: NodeId = 8;
 const LIST: NodeId = 9;
 const FOOTER: NodeId = 10;
 const ABOUT_LINK: NodeId = 11;
+const ACCOUNT: NodeId = 20;
+// The account section's children occupy ids 29..49 and are replaced wholesale on every change.
+const ACC_STACK: NodeId = 29;
+const ACC_STATUS: NodeId = 30;
+const ACC_SIGN_OUT: NodeId = 31;
+const ACC_PASSKEY_LOGIN: NodeId = 33;
+const ACC_REGISTER_FORM: NodeId = 34;
+const ACC_REGISTER_NAME: NodeId = 35;
+const ACC_REGISTER_BUTTON: NodeId = 36;
+const ACC_OIDC_BASE: NodeId = 40;
 // Task `n` occupies ids ROW_BASE + n*4 .. +2 (row, checkbox, delete button).
 const ROW_BASE: NodeId = 1000;
 
@@ -44,7 +60,10 @@ struct Task {
 #[derive(Default)]
 struct State {
     tasks: Vec<Task>,
-    /// Ids of the task nodes currently in the host's scene, so the next update can remove them.
+    signed_in: bool,
+    name: String,
+    oidc_issuers: Vec<String>,
+    /// Ids of the dynamic nodes currently in the host's scene, so the next update can remove them.
     rendered: Vec<NodeId>,
 }
 
@@ -69,6 +88,14 @@ struct SetDone {
 struct DeleteTask {
     id: u32,
 }
+#[derive(Serialize)]
+struct RegisterBegin<'a> {
+    name: &'a str,
+}
+#[derive(Serialize)]
+struct Finish<'a> {
+    response: &'a str,
+}
 #[derive(Deserialize)]
 struct TaskList {
     tasks: Vec<Task>,
@@ -79,6 +106,20 @@ struct TaskReply {
 }
 #[derive(Deserialize)]
 struct Nothing {}
+#[derive(Deserialize)]
+struct Profile {
+    signed_in: bool,
+    name: String,
+}
+#[derive(Deserialize)]
+struct Options {
+    options: String,
+}
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct Named {
+    name: String,
+}
 
 /// Encode `req`, call `method`, decode the reply. Server-declared errors become messages for the
 /// user; everything else is logged and shown as a generic failure.
@@ -97,9 +138,31 @@ fn api<Req: Serialize, Res: DeserializeOwned>(method: &str, req: &Req) -> Result
     }
 }
 
+/// A failure from a host sign-in call, as a message for the user.
+fn host_err(e: HostError) -> AppError {
+    match e {
+        HostError::Cancelled => AppError::Invalid("Sign-in was cancelled.".into()),
+        HostError::Unavailable(m) => AppError::Invalid(format!("Sign-in is not available: {m}")),
+        HostError::InvalidArgument(m) => AppError::Invalid(format!("Sign-in failed: {m}")),
+        HostError::CapabilityDenied(c) | HostError::CapabilityRevoked(c) => AppError::Invalid(format!("Not permitted: {c}")),
+        HostError::RateLimited => AppError::Invalid("Please wait a moment and try again.".into()),
+        HostError::Internal(m) => AppError::Internal(m),
+    }
+}
+
 fn reload() -> Result<(), AppError> {
     let list: TaskList = api("list_tasks", &Empty {})?;
     STATE.with(|s| s.borrow_mut().tasks = list.tasks);
+    Ok(())
+}
+
+fn load_profile() -> Result<(), AppError> {
+    let p: Profile = api("profile", &Empty {})?;
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.signed_in = p.signed_in;
+        s.name = p.name;
+    });
     Ok(())
 }
 
@@ -143,6 +206,14 @@ fn link(target: &str, label: &str) -> Body {
     Body::Link(Link { target: target.into(), label: label.into(), text: None, external: false })
 }
 
+fn button(label: &str, text: &str, emphasis: ButtonEmphasis, action: ActionRef) -> Body {
+    Body::Button(Button { label: label.into(), text: Some(text.into()), emphasis, disabled: false, on_press: action })
+}
+
+fn host_of(issuer: &str) -> &str {
+    issuer.split("://").last().unwrap_or(issuer).split('/').next().unwrap_or(issuer)
+}
+
 // ---- Scenes -----------------------------------------------------------------------------------
 
 fn summary_node() -> Node {
@@ -153,6 +224,68 @@ fn summary_node() -> Node {
         format!("{} task{}, {} done", n, if n == 1 { "" } else { "s" }, done)
     });
     node(SUMMARY, text(&t), &[])
+}
+
+/// The account section's nodes. The first is the stack that sits inside the ACCOUNT region.
+fn account_nodes() -> Vec<Node> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        let mut nodes = Vec::new();
+        if s.signed_in {
+            nodes.push(node(ACC_STACK, stack(Axis::Horizontal, Token::Md), &[ACC_STATUS, ACC_SIGN_OUT]));
+            nodes.push(node(ACC_STATUS, text(&format!("Signed in as {}", s.name)), &[]));
+            nodes.push(node(ACC_SIGN_OUT, button("Sign out", "Sign out", ButtonEmphasis::Secondary, act("sign_out", &[])), &[]));
+        } else {
+            let mut kids = vec![ACC_STATUS, ACC_PASSKEY_LOGIN, ACC_REGISTER_FORM];
+            for i in 0..s.oidc_issuers.len() {
+                kids.push(ACC_OIDC_BASE + i as u32);
+            }
+            nodes.push(node(ACC_STACK, stack(Axis::Vertical, Token::Sm), &kids));
+            nodes.push(node(ACC_STATUS, text("You are not signed in. Your tasks are kept for this device only."), &[]));
+            nodes.push(node(
+                ACC_PASSKEY_LOGIN,
+                button("Sign in with a passkey", "Sign in with a passkey", ButtonEmphasis::Primary, act("passkey_login", &[])),
+                &[],
+            ));
+            nodes.push(node(
+                ACC_REGISTER_FORM,
+                Body::Form(Form { label: "Create an account with a passkey".into(), on_submit: act("passkey_register", &[]) }),
+                &[ACC_REGISTER_NAME, ACC_REGISTER_BUTTON],
+            ));
+            nodes.push(node(
+                ACC_REGISTER_NAME,
+                Body::Input(Input {
+                    name: "account_name".into(),
+                    kind: InputKind::Text,
+                    label: "Account name".into(),
+                    value: Some(String::new()),
+                    placeholder: None,
+                    required: true,
+                    sensitive: false,
+                    autocomplete: Some("username".into()),
+                    min: None,
+                    max: None,
+                    max_length: Some(80),
+                    on_change: None,
+                }),
+                &[],
+            ));
+            nodes.push(node(
+                ACC_REGISTER_BUTTON,
+                button("Create account with a passkey", "Create passkey", ButtonEmphasis::Secondary, act("passkey_register", &[])),
+                &[],
+            ));
+            for (i, issuer) in s.oidc_issuers.iter().enumerate() {
+                let label = format!("Sign in with {}", host_of(issuer));
+                nodes.push(node(
+                    ACC_OIDC_BASE + i as u32,
+                    button(&label, &label, ButtonEmphasis::Secondary, act("oidc_login", &[("issuer", Scalar::Text(issuer.clone()))])),
+                    &[],
+                ));
+            }
+        }
+        nodes
+    })
 }
 
 /// Nodes for every task row, plus the row ids (the list's children).
@@ -178,13 +311,7 @@ fn task_nodes() -> (Vec<Node>, Vec<NodeId>) {
             ));
             nodes.push(node(
                 del,
-                Body::Button(Button {
-                    label: format!("Delete {}", t.title),
-                    text: Some("Delete".into()),
-                    emphasis: ButtonEmphasis::Plain,
-                    disabled: false,
-                    on_press: act("delete_task", &[("id", tid)]),
-                }),
+                button(&format!("Delete {}", t.title), "Delete", ButtonEmphasis::Plain, act("delete_task", &[("id", tid)])),
                 &[],
             ));
             rows.push(row);
@@ -220,31 +347,24 @@ fn input_node() -> Node {
 
 fn home_scene() -> Scene {
     let (tasks, rows) = task_nodes();
-    STATE.with(|s| s.borrow_mut().rendered = tasks.iter().map(|n| n.id).collect());
+    let account = account_nodes();
+    STATE.with(|s| s.borrow_mut().rendered = tasks.iter().chain(account.iter()).map(|n| n.id).collect());
 
     let mut nodes = vec![
-        padded(ROOT, stack(Axis::Vertical, Token::Md), &[HEADER, MAIN, FOOTER]),
+        padded(ROOT, stack(Axis::Vertical, Token::Md), &[HEADER, ACCOUNT, MAIN, FOOTER]),
         node(HEADER, region(Landmark::Banner, "Site header"), &[TITLE]),
         node(TITLE, heading(1, "Lattice Tasks"), &[]),
+        node(ACCOUNT, region(Landmark::Complementary, "Account"), &[ACC_STACK]),
         node(MAIN, region(Landmark::Main, "Task list"), &[FORM, SUMMARY, LIST]),
         node(FORM, Body::Form(Form { label: "Add a task".into(), on_submit: act("add_task", &[]) }), &[INPUT, ADD]),
         input_node(),
-        node(
-            ADD,
-            Body::Button(Button {
-                label: "Add task".into(),
-                text: Some("Add".into()),
-                emphasis: ButtonEmphasis::Primary,
-                disabled: false,
-                on_press: act("add_task", &[]),
-            }),
-            &[],
-        ),
+        node(ADD, button("Add task", "Add", ButtonEmphasis::Primary, act("add_task", &[])), &[]),
         summary_node(),
         list_node(&rows),
         node(FOOTER, region(Landmark::Contentinfo, "Site footer"), &[ABOUT_LINK]),
         node(ABOUT_LINK, link("/about", "About this app"), &[]),
     ];
+    nodes.extend(account);
     nodes.extend(tasks);
     Scene { title: "Lattice Tasks".into(), lang: Some("en".into()), live: Some(SUMMARY), root: ROOT, nodes }
 }
@@ -252,22 +372,26 @@ fn home_scene() -> Scene {
 fn about_scene() -> Scene {
     let nodes = vec![
         padded(1, stack(Axis::Vertical, Token::Md), &[2, 3]),
-        node(2, region(Landmark::Main, "About"), &[4, 5, 6]),
+        node(2, region(Landmark::Main, "About"), &[4, 5, 6, 8]),
         node(3, region(Landmark::Navigation, "Navigation"), &[7]),
         node(4, heading(1, "About"), &[]),
         node(5, text("Your tasks live on the server. This component asks for them over typed RPC and draws what it gets back."), &[]),
         node(6, text("Every request and response is validated against the API description before it crosses the boundary."), &[]),
+        node(8, text("Signing in is done by the host, not by this component. The component never sees a password, a passkey or a session token."), &[]),
         node(7, link("/", "Back to the task list"), &[]),
     ];
     Scene { title: "About".into(), lang: Some("en".into()), live: None, root: 1, nodes }
 }
 
-/// Replace the dynamic part of the scene: remove old task nodes, add the current ones, refresh the
-/// list and summary.
+/// Replace the dynamic parts of the scene: remove old nodes, add the current ones, refresh the list
+/// and summary. Used after anything that can change the account or the tasks.
 fn refresh(focus: Option<NodeId>) -> Update {
     let (tasks, rows) = task_nodes();
-    let old = STATE.with(|s| std::mem::replace(&mut s.borrow_mut().rendered, tasks.iter().map(|n| n.id).collect()));
+    let account = account_nodes();
+    let fresh: Vec<NodeId> = tasks.iter().chain(account.iter()).map(|n| n.id).collect();
+    let old = STATE.with(|s| std::mem::replace(&mut s.borrow_mut().rendered, fresh));
     let mut ops: Vec<PatchOp> = old.into_iter().map(PatchOp::RemoveNode).collect();
+    ops.extend(account.into_iter().map(PatchOp::SetNode));
     ops.extend(tasks.into_iter().map(PatchOp::SetNode));
     ops.push(PatchOp::SetNode(list_node(&rows)));
     ops.push(PatchOp::SetNode(summary_node()));
@@ -279,6 +403,13 @@ fn refresh(focus: Option<NodeId>) -> Update {
 fn arg_int(call: &ActionCall, name: &str) -> Option<u32> {
     call.args.iter().find_map(|(k, v)| match v {
         Scalar::Integer(i) if k == name => u32::try_from(*i).ok(),
+        _ => None,
+    })
+}
+
+fn arg_text(call: &ActionCall, name: &str) -> Option<String> {
+    call.args.iter().find_map(|(k, v)| match v {
+        Scalar::Text(t) if k == name => Some(t.clone()),
         _ => None,
     })
 }
@@ -297,17 +428,35 @@ fn value_bool(call: &ActionCall) -> Option<bool> {
     })
 }
 
+/// The session changed (by sign-in, sign-out or the host). Everything that depends on who the user is
+/// has to be asked for again.
+fn after_session_change() -> Result<Update, AppError> {
+    load_profile()?;
+    reload()?;
+    Ok(refresh(None))
+}
+
+fn options_text(o: Options) -> Vec<u8> {
+    o.options.into_bytes()
+}
+
+fn response_text(bytes: Vec<u8>) -> Result<String, AppError> {
+    String::from_utf8(bytes).map_err(|_| AppError::Internal("host returned non-UTF-8".into()))
+}
+
 struct TasksApp;
 
 impl Guest for TasksApp {
     fn init(launch: Launch) -> Result<(), AppError> {
         log::write(Level::Info, &format!("tasks starting for {} ({})", launch.origin, launch.locale));
+        STATE.with(|s| s.borrow_mut().oidc_issuers = launch.oidc_issuers);
         Ok(())
     }
 
     fn route(request: RouteRequest) -> Result<Scene, AppError> {
         match request.handler.as_str() {
             "Home" => {
+                load_profile()?;
                 reload()?;
                 Ok(home_scene())
             }
@@ -347,6 +496,33 @@ impl Guest for TasksApp {
                 STATE.with(|s| s.borrow_mut().tasks.retain(|t| t.id != id));
                 Ok(refresh(Some(INPUT)))
             }
+
+            // ---- Accounts ------------------------------------------------------------------
+            "passkey_register" => {
+                let name = value_text(&call, "account_name").unwrap_or_default();
+                if name.trim().is_empty() {
+                    return Err(AppError::Invalid("Choose an account name first.".into()));
+                }
+                let begin: Options = api("passkey_register_begin", &RegisterBegin { name: name.trim() })?;
+                let created = auth::passkey_create(&options_text(begin)).map_err(host_err)?;
+                let _: Named = api("passkey_register_finish", &Finish { response: &response_text(created)? })?;
+                after_session_change()
+            }
+            "passkey_login" => {
+                let begin: Options = api("passkey_login_begin", &Empty {})?;
+                let asserted = auth::passkey_assert(&options_text(begin)).map_err(host_err)?;
+                let _: Named = api("passkey_login_finish", &Finish { response: &response_text(asserted)? })?;
+                after_session_change()
+            }
+            "oidc_login" => {
+                let issuer = arg_text(&call, "issuer").ok_or_else(|| AppError::Invalid("missing issuer".into()))?;
+                auth::sign_in_oidc(&issuer).map_err(host_err)?;
+                after_session_change()
+            }
+            "sign_out" => {
+                session::sign_out();
+                after_session_change()
+            }
             other => {
                 log::write(Level::Warn, &format!("unknown action {other}"));
                 Err(AppError::Invalid(format!("unknown action {other}")))
@@ -354,8 +530,11 @@ impl Guest for TasksApp {
         }
     }
 
-    fn on_event(_event: HostEvent) -> Result<Update, AppError> {
-        Ok(Update { ops: vec![], focus: None })
+    fn on_event(event: HostEvent) -> Result<Update, AppError> {
+        match event {
+            HostEvent::SessionChanged(_) => after_session_change(),
+            _ => Ok(Update { ops: vec![], focus: None }),
+        }
     }
 }
 

@@ -6,7 +6,7 @@ and replaces the application layer with typed, compiled, semantic parts.
 
 **Lattice Navigator** (the "Navigator" for short) is the host/client that runs Lattice apps.
 
-> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, two reference apps).
+> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, sign-in with OIDC and passkeys, two reference apps).
 > Not production software: see "Prototype limits" below.
 
 ## Principles
@@ -81,6 +81,19 @@ cd server && npm install && node server.mjs --app ../examples/tasks --port 8080
 cd navigator && npm install && node navigator.mjs http://127.0.0.1:8080/ --dev
 ```
 
+To try sign-in with the `tasks` app, also start the development identity provider and tell the server to trust it:
+
+```
+cd server && node dev-idp.mjs --port 9000 --client-id lattice-tasks                      # NOT for production
+cd server && node server.mjs --app ../examples/tasks --port 8080 --dev \
+    --oidc http://127.0.0.1:9000,lattice-tasks
+cd navigator && node navigator.mjs http://127.0.0.1:8080/ --dev
+# open http://tasks.localhost:7070/  (the app's own domain, which a browser accepts as the passkey relying party)
+```
+
+You get "Create passkey", "Sign in with a passkey", and "Sign in with 127.0.0.1:9000" in the app. The dialogs and the strip at the
+top ("tasks.localhost · Signed in as ...") are drawn by Navigator, not by the app.
+
 What happens: Lattice Navigator asks the origin for `application/vnd.lattice.app+cbor`, validates the manifest, downloads the
 component by content hash and refuses it if the bytes differ, runs it with only the host imports the manifest grants
 (`tasks`: `log` and `rpc`), and renders the scene tree it returns. For `tasks`, every call the component makes to
@@ -90,8 +103,9 @@ Tests:
 
 ```
 cd spec && npm install && npm run validate        # schemas, fixtures, WIT parses, WIT/schema agree
-cd navigator && npm test                                # 34 end-to-end tests with the real components
+cd navigator && npm test                                # 58 end-to-end tests with the real components
 cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Edge/Chrome through the UI
+cd navigator && node test/auth-browser-check.mjs                      # sign-in in Edge/Chrome with a virtual authenticator
 ```
 
 ## Prototype limits
@@ -99,7 +113,11 @@ cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Ed
 - Lattice Navigator runs the component in a Node worker thread and shows the UI in a local browser page. A browser-only Lattice Navigator (service
   worker plus transpiled WASM) is not built yet.
 - Implemented host imports: `log`, `storage`, `rpc` (request/response only). The rest of `spec/wit/capabilities.wit`
-  is specified, not implemented. The `session` token is anonymous and host-generated: there is no sign-in yet.
+  is specified, not implemented.
+- Auth: OIDC and passkeys work end to end, but accounts and sessions live in the origin's memory, there is no account
+  recovery or credential management, and the only identity provider tried is the bundled development one (it is
+  standards-shaped but not a real provider). Passkeys need Navigator's page served from the app's domain, so in this
+  prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
 - RPC: no streaming, no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps
   state in memory.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
@@ -116,7 +134,8 @@ cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Ed
 3. [x] Lattice Navigator (Node host + semantic browser UI), reference todo app, end-to-end and browser tests
 4. [x] Typed RPC (`rpc` import), API descriptions, and a server-backed app
 5. [ ] Browser-only Lattice Navigator (service worker + transpiled WASM)
-6. [ ] Auth (OIDC + passkeys), then payments (Stripe Checkout), then analytics
+6. [x] Auth: OIDC and passkeys, host-drawn sign-in, session upgrade
+6b. [ ] Payments (Stripe Checkout), then analytics
 7. [ ] A 2D multiplayer world (WebTransport + canvas)
 
 ## License

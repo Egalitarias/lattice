@@ -19,13 +19,16 @@ const appDir = resolve(here, "..", "..", "examples", "todo");
 const listen = (server) => new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server.address().port)));
 const close = (server) => new Promise((ok) => { server.close(ok); server.closeAllConnections?.(); });
 const quiet = () => {};
+// Transpiled components are content-addressed, so every test can share one cache.
+const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
+
 
 async function withNavigator(fn, { dataDir } = {}) {
   const app = await loadApp({ appDir });
   const origin = createServer(app);
   const originPort = await listen(origin);
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), "nav-e2e-"));
-  const nav = await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet });
+  const nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet });
   const call = async (method, path, body, headers = {}) => {
     const res = await fetch(`http://127.0.0.1:${nav.port}${path}`, {
       method,
@@ -221,6 +224,6 @@ test("a component that needs a capability the manifest does not grant fails to l
   const port = await listen(server);
   const dir = mkdtempSync(join(tmpdir(), "nav-link-"));
   try {
-    await assert.rejects(startNavigator({ url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet }), (e) => e instanceof LoadError && /could not be linked/.test(e.message));
+    await assert.rejects(startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${port}/`, dev: true, port: 0, dataDir: dir, log: quiet }), (e) => e instanceof LoadError && /could not be linked/.test(e.message));
   } finally { await close(server); rmSync(dir, { recursive: true, force: true }); }
 });

@@ -41,6 +41,9 @@ Lattice-Session: <opaque>         only when the manifest requests the `session` 
 
 `200`, `Content-Type: application/vnd.lattice.rpc+cbor`, body is the CBOR response.
 
+A `200` response may also carry `Lattice-Set-Session` or `Lattice-Clear-Session` to change the host's session
+(sign-in, sign-out; see `auth.md`). The host consumes these headers; they are never visible to the app.
+
 ### Errors
 
 Any status of 400 or above, `Content-Type: application/vnd.lattice.rpc-error+cbor`, body:

@@ -29,8 +29,8 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 | Capability | Purpose | Rendering | Prompt |
 |---|---|---|---|
 | `session` | Host-managed, origin-bound session token sent as `Lattice-Session` on RPC calls. Not readable by app code. Anonymous until an `auth.*` flow signs the user in | data | none |
-| `auth.passkey` | Register/assert a WebAuthn credential bound to the domain | host UI | each time |
-| `auth.oidc` | OIDC authorization-code + PKCE flow against a declared issuer (Google, Apple, GitHub, enterprise IdPs). App receives only the code/ID token | host UI | each time |
+| `auth.passkey` | Create/assert a WebAuthn credential whose relying party is exactly the app's domain (`auth.md`) | host UI | each time |
+| `auth.oidc` | OIDC authorization-code + PKCE flow against an issuer listed in the manifest (Google, Apple, GitHub, enterprise IdPs). The app never receives the code or any token; the origin's server verifies the ID token and issues the session (`auth.md`) | host UI | each time |
 | `identity.age_over` | Yes/no proof the user is over N, via verifiable credential. App never sees a birthdate | host UI | each time |
 | `contacts.pick` | User chooses specific contacts to share. App receives only chosen entries | host UI | each time |
 | `consent` | Records versioned consent (terms, marketing, data processing) with a receipt | host UI | each time |

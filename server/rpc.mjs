@@ -10,6 +10,13 @@ export const RPC_TYPE = "application/vnd.lattice.rpc+cbor";
 export const RPC_ERROR_TYPE = "application/vnd.lattice.rpc-error+cbor";
 const MAX_BODY = 1024 * 1024;
 
+/** Encode a session change for the Lattice-Set-Session header (spec/auth.md). */
+export function sessionHeader({ token, subject, name, expires }) {
+  const body = { token, subject, expires };
+  if (name) body.name = name;
+  return Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
+}
+
 export const STANDARD_ERRORS = {
   invalid_request: 400,
   unauthorized: 401,
@@ -90,7 +97,14 @@ export function createRpc({ apiDescription, apiHash, handlers, log = console.err
       }
 
       const session = req.headers["lattice-session"];
-      const result = await m.handler(request, { session: typeof session === "string" ? session : undefined });
+      // Handlers change the host's session through ctx; the headers are only sent on a 200.
+      const change = {};
+      const ctx = {
+        session: typeof session === "string" && session ? session : undefined,
+        setSession: (info) => { change.set = info; },
+        clearSession: () => { change.clear = true; },
+      };
+      const result = await m.handler(request, ctx);
 
       if (!m.validateResponse(result)) {
         log(`rpc ${method}: handler response violates the API description: ${ajv.errorsText(m.validateResponse.errors)}`);
@@ -101,7 +115,10 @@ export function createRpc({ apiDescription, apiHash, handlers, log = console.err
         log(`rpc ${method}: response too large`);
         return fail(res, 500, "internal", "internal error");
       }
-      res.writeHead(200, { "Content-Type": RPC_TYPE, "Content-Length": body.length });
+      const headers = { "Content-Type": RPC_TYPE, "Content-Length": body.length };
+      if (change.set) headers["Lattice-Set-Session"] = sessionHeader(change.set);
+      else if (change.clear) headers["Lattice-Clear-Session"] = "1";
+      res.writeHead(200, headers);
       res.end(body);
     } catch (e) {
       if (e instanceof ApiError) {
