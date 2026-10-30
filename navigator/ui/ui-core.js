@@ -483,6 +483,12 @@ function describe(p) {
   const who = `${p.app.name} (${p.app.domain})`;
   switch (p.flow) {
     case "payment":
+      if (p.step === "verify") {
+        return {
+          title: "Your bank needs to verify this payment",
+          text: `A new window will open on ${p.actionHost} so that you can verify paying ${money(p.summary.total_minor, p.summary.currency)} to ${p.app.name}.`,
+        };
+      }
       if (p.method === "card") {
         return {
           title: `Pay ${money(p.summary.total_minor, p.summary.currency)} to ${p.app.name}`,
@@ -505,7 +511,7 @@ function describe(p) {
 function showAuth(p) {
   activePrompt = p;
   const d = describe(p);
-  const cont = h("button", { type: "button", "data-emphasis": "primary" }, "Continue");
+  const cont = h("button", { type: "button", "data-emphasis": "primary" }, p.step === "verify" ? "Continue to your bank" : "Continue");
   const cancel = h("button", { type: "button" }, "Cancel");
   const status = h("p", { role: "status", id: "auth-status" });
   cont.addEventListener("click", () => proceed(p, cont, status));
@@ -521,7 +527,7 @@ function showAuth(p) {
     total.style.fontWeight = "600";
     parts.push(list, total);
   }
-  if (p.flow === "payment" && p.method === "card") return showCardSheet(p, d, parts, status, cancel);
+  if (p.flow === "payment" && p.method === "card" && p.step !== "verify") return showCardSheet(p, d, parts, status, cancel);
   dialog.replaceChildren(...parts, status, h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }, ""));
   dialog.lastChild.append(cont, cancel);
   if (!dialog.open) dialog.showModal();
@@ -554,6 +560,7 @@ function showCardSheet(p, d, parts, status, cancel) {
     pay.disabled = false;
     number.input.focus();
   });
+  if (p.error) status.textContent = p.error;
   dialog.replaceChildren(...parts, form);
   if (!dialog.open) dialog.showModal();
   number.input.focus();

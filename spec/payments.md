@@ -142,9 +142,46 @@ Navigator it crosses the local loopback connection between the Navigator's windo
 protected like every other request there (a custom header and an `Origin` check). Messages from the processor that are
 shown to the user are shortened and have long digit runs replaced.
 
-Up to five attempts are allowed per sheet; a declined card keeps the sheet open for another card. A card that needs
-extra verification (3-D Secure) ends the payment with an explanation: the sheet cannot show the bank's page yet, so
-such cards need the hosted handler.
+Up to five attempts are allowed per sheet; a declined card keeps the sheet open for another card.
+
+### 3-D Secure in the sheet
+
+The bank's page opens in its own window, as hosted checkout does, so no processor script runs in the host and no client
+secret reaches it.
+
+```
+Host ── POST {payments.server}/confirm  { order_ref, reference, payment_method, return_url } ──────► Server
+Server: checks return_url as /sessions does; confirms the intent with payment_method and return_url
+        reply: 200 { "status": "requires_action", "action_url": "<next_action.redirect_to_url.url>" }
+Host: validates action_url; stops taking cards; the sheet says "Your bank needs to verify this payment"  [Continue to your bank] [Cancel]
+User clicks ──► Host opens action_url in a new window (noopener)
+User ◄──► Bank
+Processor ──► redirect to return_url?state=...&payment_intent=pi_...&redirect_status=...
+Host: state and payment_intent must match the waiting sheet, then
+      redirect_status=failed -> back to the form with an explanation, for another card;  otherwise resolve payments.request
+Processor ──► Server: signed webhook  payment_intent.succeeded   (still the only thing that marks the order paid)
+```
+
+- **The second click is deliberate.** Browsers block a window opened after waiting on the network, so it must come from a click.
+- **`action_url`** comes from the app's server, so it is checked like a checkout URL: `https` on a host in the handler's
+  registry entry (`stripe-card` -> `hooks.stripe.com`, to be confirmed against Stripe's test mode), or in development only,
+  `http` on loopback; no credentials; at most 2048 characters. A `requires_action` reply with no usable `action_url`
+  (another `next_action` type) ends the payment with today's explanation.
+- **`state` is new for each confirm**, so a stale "failed" link cannot disturb a later attempt on the same sheet. Repeated
+  `state`, `payment_intent` or `redirect_status` parameters are refused. A failed verification counts towards the five attempts.
+- **`redirect_status` only decides what to show.** As with every return, the receipt means the user came back, not that they paid.
+- **Cancelling is not proof of non-payment.** The user can cancel while the bank is still finishing, so the app may see
+  `cancelled` for an order that a later webhook marks paid. Apps must ask their server, as they already must. A retry after
+  a failed verification confirms the same intent, so it cannot charge twice. Buying again after cancelling makes a new intent,
+  so if the bank then completes the old one the order is paid twice; that is detected and logged, not refunded, as with
+  two checkout sessions.
+- **The sheet's fields are emptied** as soon as verification starts; another card is typed afresh.
+- **The stand-in** gains `return_url` on confirm, `next_action.redirect_to_url`, and a page with "complete" and "fail" buttons
+  that sends the webhook and redirects, so the existing test card (`4000 0025 0000 3155`) exercises the whole flow.
+
+The return lands where any other payment return does, so the prototype's `.localhost` constraint and the "Honest limits"
+below still apply. An iframe in the dialog was rejected: many banks refuse to be framed, and the user could not check
+the page's address.
 
 ### Server duties
 
@@ -190,6 +227,7 @@ returns the same checkout rather than a second one.
 | Handler | Checkout host | Webhook |
 |---|---|---|
 | `stripe` | `checkout.stripe.com` | `Stripe-Signature` (HMAC-SHA256, `t=` timestamp, `v1=` signature) |
+| `stripe-card` | none: the host draws the form and the card goes to `api.stripe.com` | as above |
 
 ## Prototype constraint: where the return lands
 
@@ -200,7 +238,7 @@ Navigator would claim the app's domain and has no such limit.
 
 ## Not specified yet
 
-- A host-drawn sheet with cards or wallets, and the tokens it would produce (`payments.request` does not return one)
+- A wallet sheet, and the tokens it would produce (`payments.request` does not return one)
 - Recurring payments and mandates (`payments.mandate`)
 - Refunds, disputes, and receipts shown by the host
 - Currency display rules beyond the ISO code; tax and shipping (the server includes them in the order)

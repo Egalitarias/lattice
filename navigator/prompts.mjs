@@ -53,6 +53,15 @@ export class Prompts {
     return this.#pending.get(id);
   }
 
+  /** Show a pending interaction differently: `prompt` replaces what the windows were told (its id and app stay). */
+  update(id, prompt) {
+    const p = this.#pending.get(id);
+    if (!p) return false;
+    p.prompt = { id, app: p.prompt.app, ...prompt };
+    this.broadcast({ kind: "prompt", prompt: p.prompt });
+    return true;
+  }
+
   /** The pending interaction of this flow that was bound to `state` (a redirect's single-use value). */
   byState(flow, state) {
     if (typeof state !== "string" || !state) return undefined;

@@ -71,16 +71,124 @@ test("card sheet: a declined card keeps the sheet open for another try; the retr
   });
 });
 
-test("card sheet: a card that needs extra verification ends the payment with an explanation, not a hang", async () => {
+// ---- 3-D Secure ----------------------------------------------------------------------------------------------------
+
+const VERIFY = { number: "4000 0025 0000 3155" };
+const sheet = async (h) => (await h.state()).chrome.prompts[0];
+
+test("3-D Secure: the sheet sends the user to the bank, and the webhook, not the return, unlocks Pro", async () => {
   await stack(async (h) => {
     const { pending, prompt } = await startCardPurchase(h);
-    const r = await card(h, prompt.id, { number: "4000 0025 0000 3155" });
-    assert.equal(r.status, 422);
-    assert.match(r.body.error, /verify/i);
-    const done = await pending;
-    assert.notEqual(done.status, 200, "the app was told it did not go through");
-    assert.equal((await h.state()).chrome.prompts.length, 0);
+    h.psp.configure({ webhookDelayMs: Infinity });
+    assert.equal((await card(h, prompt.id, VERIFY)).status, 200);
+
+    // The window is told where to go and nothing else; the same prompt stays open, and no card is in it.
+    const shown = await sheet(h);
+    assert.equal(shown.id, prompt.id);
+    assert.equal(shown.step, "verify");
+    assert.equal(new URL(shown.url).pathname.startsWith("/authenticate/pi_"), true);
+    assert.equal(shown.actionHost, `127.0.0.1:${h.psp.port}`);
+    assert.doesNotMatch(JSON.stringify(shown), /3155|client_secret/);
+    assert.match((await card(h, prompt.id)).body.error, /bank/, "no other card while the bank is waiting");
+
+    const { location } = await h.atProcessor(shown.url, "complete");
+    assert.equal((await h.callback(location)).status, 200);
+    assert.equal((await pending).status, 200);
+
+    // The user came back, but nothing is paid until the signed webhook says so.
+    assert.equal([...h.payments.orders.values()][0].status, "pending");
     assert.equal(await isPro(h), false);
+    await h.psp.releasePending();
+    assert.equal([...h.payments.orders.values()][0].status, "paid");
+    assert.equal((await h.press("Check payment")).status, 200);
+    assert.equal(await isPro(h), true);
+    assert.equal((await h.callback(location)).status, 400, "the return cannot be replayed");
+  });
+});
+
+test("3-D Secure: a failed verification goes back to the form, its link is dead, and another card pays the same intent", async () => {
+  await stack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    await card(h, prompt.id, VERIFY);
+    const { location } = await h.atProcessor((await sheet(h)).url, "fail");
+    const back = await h.callback(location);
+    assert.equal(back.status, 400);
+    assert.match(back.body, /did not verify/);
+
+    const shown = await sheet(h);
+    assert.equal(shown.step, undefined);
+    assert.equal(shown.url, undefined);
+    assert.match(shown.error, /did not verify/);
+    assert.equal(await isPro(h), false);
+    assert.equal([...h.payments.orders.values()][0].status, "failed");
+
+    await card(h, prompt.id, VERIFY);
+    assert.equal((await h.callback(location)).status, 400, "the stale link does not disturb the new attempt");
+    assert.equal((await sheet(h)).step, "verify");
+    const url = (await sheet(h)).url;
+    await h.atProcessor(url, "complete").then(({ location: l }) => h.callback(l));
+    assert.equal((await pending).status, 200);
+    assert.ok(await until(() => isPro(h)));
+    assert.equal(h.psp.intents.size, 1, "one intent, so it cannot be charged twice");
+  });
+});
+
+test("3-D Secure: a return that does not match the waiting payment is refused and changes nothing", async () => {
+  await stack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    await card(h, prompt.id, VERIFY);
+    const { url } = await sheet(h);
+    const intent = new URL(url).pathname.split("/").pop();
+    const state = new URL(h.psp.intents.get(intent).next_action.redirect_to_url.return_url).searchParams.get("state");
+    const at = (q) => h.callback(`${h.nav.uiOrigin}/_navigator/payment/return?${q}`);
+    for (const q of [
+      `state=${state}`,
+      `state=${state}&payment_intent=pi_someotherintent`,
+      `state=${state}&payment_intent=${intent}&payment_intent=pi_someotherintent`,
+      `state=${state}&payment_intent=${intent}&redirect_status=failed&redirect_status=succeeded`,
+      `state=wrong&payment_intent=${intent}&redirect_status=succeeded`,
+    ]) assert.equal((await at(q)).status, 400, q);
+    assert.equal((await sheet(h)).step, "verify");
+    await h.call("/_navigator/prompt/cancel", { id: prompt.id });
+    assert.notEqual((await pending).status, 200);
+  });
+});
+
+test("3-D Secure: a return before any bank was asked for is refused", async () => {
+  await stack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    const entry = h.nav.controller.prompts.get(prompt.id);
+    assert.equal((await h.callback(`${h.nav.uiOrigin}/_navigator/payment/return?state=${entry.state}&payment_intent=${entry.reference}`)).status, 400);
+    assert.equal((await sheet(h)).id, prompt.id);
+    await h.call("/_navigator/prompt/cancel", { id: prompt.id });
+    await pending;
+  });
+});
+
+test("3-D Secure: cancelling while the bank is waiting tells the app, and a later webhook still decides what is paid", async () => {
+  await stack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    await card(h, prompt.id, VERIFY);
+    const { url } = await sheet(h);
+    await h.call("/_navigator/prompt/cancel", { id: prompt.id });
+    assert.notEqual((await pending).status, 200);
+
+    const { location } = await h.atProcessor(url, "complete");
+    assert.equal((await h.callback(location)).status, 400, "no sheet is waiting any more");
+    assert.equal([...h.payments.orders.values()][0].status, "paid");
+  });
+});
+
+test("3-D Secure: the server refuses a return address that is not the host's", async () => {
+  await stack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    const token = h.nav.controller.sessionStore.token();
+    const order = [...h.payments.orders.values()][0];
+    const [intent] = [...h.psp.intents.values()];
+    const r = await confirm(h, { order_ref: order.id, reference: intent.id, payment_method: "pm_" + "a".repeat(24), return_url: `http://evil.example/_navigator/payment/return?state=${"a".repeat(32)}` }, token);
+    assert.equal(r.status, 400);
+    await h.call("/_navigator/prompt/cancel", { id: prompt.id });
+    await pending;
   });
 });
 
@@ -249,4 +357,34 @@ test("host: the reply for a card sheet must carry the manifest's own publishable
   })) assert.equal(await run(reply), false, name);
   assert.equal(await run({ ...good(), api: "http://127.0.0.1:9" }, { dev: true }), true, "loopback is fine in development");
   assert.equal(await run(good(), { m: { ...manifest, payments: { ...manifest.payments, merchant: { domain: "tasks.localhost" } } } }), false, "a manifest with no publishable key cannot use the card sheet");
+});
+
+test("host: the bank's address must be one the handler may use; anything else ends the payment with an explanation", async () => {
+  const manifest = { app: "tasks.localhost", payments: { handlers: ["stripe-card"], merchant: { domain: "tasks.localhost", stripe_publishable_key: "pk_test_mine" }, server: "https://tasks.localhost/pay" } };
+  const session = { handler: "stripe-card", reference: "pi_abc123", publishable_key: "pk_test_mine", api: "https://api.stripe.com", summary: { currency: "USD", total_minor: 100, items: [{ label: "x", amount_minor: 100, quantity: 1 }] } };
+  const run = async (actionUrl, dev = false) => {
+    const msgs = [];
+    const prompts = new Prompts({ broadcast: (x) => msgs.push(x), app: { name: "T", domain: "tasks.localhost" }, timeoutMs: 500 });
+    const fetchImpl = async (url) => {
+      const reply = String(url).endsWith("/sessions") ? session : String(url).endsWith("/confirm") ? { status: "requires_action", action_url: actionUrl } : null;
+      return reply ? { ok: true, status: 200, text: async () => JSON.stringify(reply) } : { ok: true, status: 200, json: async () => ({ id: "pm_abc123" }) };
+    };
+    const broker = new PaymentBroker({ manifest, endpoint: "http://x/pay", session: { token: () => "t" }, uiOrigin: () => "http://x", prompts, dev, fetchImpl });
+    const done = broker.request("ord_1").then(() => "resolved", (e) => e.hostError?.tag);
+    await sleep(10);
+    const { id } = msgs.find((x) => x.kind === "prompt").prompt;
+    const submitted = await broker.submitCard(id, GOOD);
+    const verifying = prompts.get(id)?.prompt.step === "verify";
+    prompts.dispose();
+    return { submitted, verifying, outcome: await done };
+  };
+  assert.equal((await run("https://hooks.stripe.com/redirect/authenticate/src_1")).verifying, true);
+  assert.equal((await run("http://127.0.0.1:9/authenticate/pi_1", true)).verifying, true, "loopback is fine in development");
+  for (const url of ["https://evil.example/x", "http://hooks.stripe.com/x", "https://u:p@hooks.stripe.com/x", "https://checkout.stripe.com/x", "http://127.0.0.1:9/x", "javascript:alert(1)", `https://hooks.stripe.com/${"x".repeat(2100)}`, 7, undefined]) {
+    const r = await run(url);
+    assert.equal(r.verifying, false, String(url).slice(0, 40));
+    assert.equal(r.submitted.ok, false);
+    assert.match(r.submitted.error, /verify/);
+    assert.equal(r.outcome, "unavailable", "the app is told it did not go through");
+  }
 });

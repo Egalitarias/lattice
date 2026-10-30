@@ -11,6 +11,8 @@
 //                                     4000 0025 0000 3155 asks for extra authentication
 //   POST /v1/payment_intents          create an intent (secret key)
 //   POST /v1/payment_intents/:id/confirm   confirm it with a payment method (secret key)
+//   GET  /authenticate/:id            the bank's verification page for an intent (3-D Secure)
+//   POST /authenticate/:id            its buttons: complete | fail
 //   GET  /c/pay/:id                   the hosted payment page (it is a web page: processors are legacy sites)
 //   POST /c/pay/:id                   the page's buttons: pay | decline | cancel
 //
@@ -110,6 +112,13 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
 
   const sessionView = ({ _items, ...s }) => ({ ...s });
 
+  /** Send an event when the configured delay says to. */
+  async function announce(ev) {
+    if (state.webhookDelayMs === 0) await deliver(ev).catch(() => {});
+    else if (Number.isFinite(state.webhookDelayMs)) setTimeout(() => deliver(ev).catch(() => {}), state.webhookDelayMs);
+    else state.pending.push(ev); // held until the test releases it
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://x");
@@ -179,15 +188,14 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
             }
             if (pm.behaviour === "authenticate") {
               intent.status = "requires_action";
-              intent.next_action = { type: "use_stripe_sdk" };
+              intent.next_action = p.return_url
+                ? { type: "redirect_to_url", redirect_to_url: { url: `${base}/authenticate/${intent.id}`, return_url: p.return_url } }
+                : { type: "use_stripe_sdk" };
               return json(res, 200, intent);
             }
             intent.status = "succeeded";
             intent.amount_received = intent.amount;
-            const ev = event("payment_intent.succeeded", { ...intent });
-            if (state.webhookDelayMs === 0) await deliver(ev).catch(() => {});
-            else if (Number.isFinite(state.webhookDelayMs)) setTimeout(() => deliver(ev).catch(() => {}), state.webhookDelayMs);
-            else state.pending.push(ev);
+            await announce(event("payment_intent.succeeded", { ...intent }));
             return json(res, 200, intent);
           }
         }
@@ -247,6 +255,36 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
         return stripeError(res, 404, "invalid_request_error", "Unrecognized request URL.");
       }
 
+      // ---- The bank's verification page --------------------------------------------------------------
+      const ap = url.pathname.match(/^\/authenticate\/(pi_[A-Za-z0-9]+)$/);
+      if (ap) {
+        const intent = intents.get(ap[1]);
+        const returnUrl = intent?.next_action?.redirect_to_url?.return_url;
+        if (!returnUrl) return page(res, 404, "<h1>Nothing to verify</h1>");
+        if (req.method === "GET") {
+          return page(res, 200, `<h1>Dev bank</h1><p>This is a development processor. Verify this payment?</p>
+            <form method="post"><p><button name="outcome" value="complete">Complete verification</button></p>
+            <p><button name="outcome" value="fail">Fail verification</button></p></form>`);
+        }
+        if (req.method === "POST") {
+          const outcome = new URLSearchParams(await body(req)).get("outcome");
+          if (outcome !== "complete" && outcome !== "fail") return page(res, 400, "<h1>Unknown choice</h1>");
+          intent.next_action = null;
+          if (outcome === "complete") {
+            intent.status = "succeeded";
+            intent.amount_received = intent.amount;
+            await announce(event("payment_intent.succeeded", { ...intent }));
+          } else {
+            intent.status = "requires_payment_method";
+            await announce(event("payment_intent.payment_failed", { ...intent }));
+          }
+          const back = new URL(returnUrl);
+          back.searchParams.set("payment_intent", intent.id);
+          back.searchParams.set("redirect_status", outcome === "complete" ? "succeeded" : "failed");
+          return void res.writeHead(303, { Location: back.href }).end();
+        }
+      }
+
       // ---- The hosted payment page -----------------------------------------------------------------
       const hp = url.pathname.match(/^\/c\/pay\/(cs_test_[A-Za-z0-9]+)$/);
       if (hp) {
@@ -276,10 +314,7 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
           if (outcome === "pay") {
             s.status = "complete";
             s.payment_status = "paid";
-            const ev = event("checkout.session.completed", sessionView(s));
-            if (state.webhookDelayMs === 0) await deliver(ev).catch(() => {});
-            else if (Number.isFinite(state.webhookDelayMs)) setTimeout(() => deliver(ev).catch(() => {}), state.webhookDelayMs);
-            else state.pending.push(ev); // held until the test releases it
+            await announce(event("checkout.session.completed", sessionView(s)));
             return void res.writeHead(303, { Location: s.success_url }).end();
           }
           return page(res, 400, "<h1>Unknown choice</h1>");

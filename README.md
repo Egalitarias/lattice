@@ -159,13 +159,14 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   (served by the app's own origin, component transpiled to JS in a Worker; see `spec/browser.md`). The browser one
   removes the `*.localhost`-only limits below for passkeys and payments (non-loopback use needs TLS), but trusts the
   origin that serves it; its component storage is `localStorage`.
-- Implemented host imports: `log`, `storage`, `rpc` (request/response only). The rest of `spec/wit/capabilities.wit`
-  is specified, not implemented.
+- Implemented host imports: `log`, `storage`, `rpc` (including topic subscriptions), `session`, `auth`, `payments`,
+  `analytics`, `experiments`. The rest of `spec/wit/capabilities.wit` (`navigation`, `notifications`, `consent`) is
+  specified, not implemented.
 - Auth: OIDC and passkeys work end to end, but accounts and sessions live in the origin's memory, there is no account
   recovery or credential management, and the only identity provider tried is the bundled development one (it is
   standards-shaped but not a real provider). Passkeys need Navigator's page served from the app's domain, so in this
   prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
-- Payments: hosted checkout, or a card sheet the host draws itself (`stripe-card`; see "Honest limits" in `spec/payments.md`: processors restrict raw card handling, and 3-D Secure cards need hosted checkout). The server code uses the
+- Payments: hosted checkout, or a card sheet the host draws itself (`stripe-card`, with 3-D Secure in the bank's own window; see "Honest limits" in `spec/payments.md`: processors restrict raw card handling). The server code uses the
   official `stripe` library but has only been run against the bundled stand-in, which mirrors Stripe's documentation.
   There is no wallet sheet, no recurring payments, refunds or receipts, and orders are in memory.
   A double payment (two checkout sessions for one order both paid) is detected and logged but not refunded.
@@ -174,7 +175,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   See `spec/payments.md`.
 - Analytics: product events, host timings and error reports, with four user-set levels, a declared event catalog,
   redaction and a transparency panel (`spec/analytics.md`). The collector in the example keeps events in memory.
-  Not specified: experiments / A/B assignment, session replay, consent flows, per-purpose levels, retention. Redaction
+  Not specified: session replay, consent flows, per-purpose levels, retention. Redaction
   catches values the user typed into sensitive inputs and common personal-data patterns in error text; it cannot catch
   data the app has transformed. The processor's server necessarily sees the user's IP address.
 - RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps state in memory.
@@ -201,7 +202,8 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
 6d. [x] A host-drawn card sheet; A/B experiments (`spec/experiments.md`)
-6e. [ ] A wallet sheet (Payment Request API), 3-D Secure in the sheet
+6e. [x] 3-D Secure in the card sheet
+6f. [ ] A wallet sheet (Payment Request API)
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
 7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
 7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface

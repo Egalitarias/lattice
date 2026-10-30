@@ -16,7 +16,8 @@ const isLoopbackHost = (h) => h === "localhost" || h === "127.0.0.1" || h === "[
 export const HANDLERS = {
   stripe: { checkoutHosts: ["checkout.stripe.com"] },
   // The host draws the card form and tokenises the card itself, at the processor's API, with the merchant's publishable key.
-  "stripe-card": { apiHosts: ["api.stripe.com"], card: true },
+  // actionHosts: where the processor may send the user to verify a card with their bank (3-D Secure).
+  "stripe-card": { apiHosts: ["api.stripe.com"], actionHosts: ["hooks.stripe.com"], card: true },
 };
 
 const MAX_CARD_ATTEMPTS = 5;
@@ -80,12 +81,13 @@ export class PaymentBroker {
     return this.dev && u.protocol === "http:" && isLoopbackHost(u.hostname) ? u.origin : null;
   }
 
-  /** Is this the kind of URL the handler may send the user to? */
-  #checkoutUrlOk(handler, value) {
+  /** Is this the kind of URL a handler may send the user to, given the hosts it may use? */
+  #userUrlOk(hosts, value) {
+    if (typeof value !== "string" || value.length > 2048) return false;
     let u;
     try { u = new URL(value); } catch { return false; }
     if (u.username || u.password) return false;
-    if (u.protocol === "https:") return HANDLERS[handler].checkoutHosts.includes(u.hostname);
+    if (u.protocol === "https:") return hosts.includes(u.hostname);
     return this.dev && u.protocol === "http:" && isLoopbackHost(u.hostname);
   }
 
@@ -103,7 +105,7 @@ export class PaymentBroker {
       if (reply.publishable_key !== this.manifest.payments.merchant.stripe_publishable_key) throw bad("the publishable key is not the manifest's");
       if (typeof reference !== "string" || !/^pi_[A-Za-z0-9_]{1,64}$/.test(reference)) throw bad("bad reference");
     } else {
-      if (typeof url !== "string" || url.length > 2048 || !this.#checkoutUrlOk(handler, url)) throw bad("the checkout address is not one this handler may use");
+      if (!this.#userUrlOk(HANDLERS[handler].checkoutHosts, url)) throw bad("the checkout address is not one this handler may use");
       if (typeof reference !== "string" || reference.length > 256) throw bad("bad reference");
     }
     if (!summary || typeof summary !== "object") throw bad("no summary");
@@ -195,6 +197,7 @@ export class PaymentBroker {
     const entry = this.prompts.get(id);
     if (!entry || entry.prompt.flow !== "payment" || entry.prompt.method !== "card") return { ok: false, error: "That payment is no longer waiting." };
     if (entry.busy) return { ok: false, error: "Your payment is already being processed." };
+    if (entry.verifying) return { ok: false, error: "Finish verifying this payment with your bank first." };
     if (entry.attempts >= MAX_CARD_ATTEMPTS) {
       this.prompts.settle(id, "reject", fail("cancelled"));
       return { ok: false, error: "Too many attempts. Start again from the app." };
@@ -208,7 +211,7 @@ export class PaymentBroker {
       if (!pm.ok) return pm;
       const confirmed = await this.#confirm(entry, pm.id);
       if (!confirmed.ok) return confirmed;
-      this.prompts.settle(id, "resolve", true);
+      if (!entry.verifying) this.prompts.settle(id, "resolve", true);
       return { ok: true };
     } finally {
       entry.busy = false;
@@ -240,12 +243,13 @@ export class PaymentBroker {
 
   /** Ask the app's server to charge the order with that token. The server, not this code, decides what is paid. */
   async #confirm(entry, paymentMethod) {
+    entry.state = rand(); // new for each confirm: a link from an earlier attempt on this sheet is dead
     let res;
     try {
       res = await this.fetchImpl(`${this.endpoint.replace(/\/$/, "")}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
-        body: JSON.stringify({ order_ref: entry.orderRef, reference: entry.reference, payment_method: paymentMethod }),
+        body: JSON.stringify({ order_ref: entry.orderRef, reference: entry.reference, payment_method: paymentMethod, return_url: `${this.uiOrigin()}/_navigator/payment/return?state=${entry.state}` }),
         redirect: "error",
         signal: AbortSignal.timeout(CARD_TIMEOUT_MS * 2),
       });
@@ -258,9 +262,16 @@ export class PaymentBroker {
     if (res.status === 402) return { ok: false, error: safeMessage(body?.message, "Your card was declined.") };
     if (!res.ok) return { ok: false, error: safeMessage(body?.message, "The payment could not be completed.") };
     if (body?.status === "requires_action") {
-      // 3-D Secure needs the processor's own page; this sheet cannot show it. Say so rather than leave the user stuck.
-      this.prompts.settle(entry.prompt.id, "reject", fail("unavailable", "the card needs extra verification, which this payment sheet cannot do yet"));
-      return { ok: false, error: "Your bank needs to verify this payment, which this sheet cannot do yet." };
+      if (this.#userUrlOk(HANDLERS[entry.handler].actionHosts, body.action_url)) {
+        // The bank's page opens in its own window, on the user's click. The form goes away, and with it what they typed.
+        entry.verifying = true;
+        const { error, ...shown } = entry.prompt;
+        this.prompts.update(entry.prompt.id, { ...shown, step: "verify", url: body.action_url, actionHost: new URL(body.action_url).host });
+        return { ok: true };
+      }
+      // A kind of verification the host cannot start. Say so rather than leave the user stuck.
+      this.prompts.settle(entry.prompt.id, "reject", fail("unavailable", "the card needs extra verification, which this payment sheet cannot do"));
+      return { ok: false, error: "Your bank needs to verify this payment, which this sheet cannot do." };
     }
     if (body?.status !== "succeeded" && body?.status !== "processing") return { ok: false, error: "The payment did not go through." };
     return { ok: true };
@@ -271,12 +282,24 @@ export class PaymentBroker {
    * tell the user. An unknown or repeated `state` is refused without touching any pending request.
    */
   callback(outcome, params) {
-    for (const name of ["state"]) {
+    for (const name of ["state", "payment_intent", "redirect_status"]) {
       if (params.getAll(name).length > 1) return { ok: false, message: "This link is not valid. Return to the app and try again." };
     }
     const entry = this.prompts.byState("payment", params.get("state"));
     if (!entry) return { ok: false, message: "This link is not valid or has expired. Return to the app and try again." };
     const id = entry.prompt.id;
+    if (entry.prompt.method === "card") {
+      // The only return a card sheet expects is from the bank, for the payment it is waiting on.
+      if (!entry.verifying || params.get("payment_intent") !== entry.reference) return { ok: false, message: "This link is not valid or has expired. Return to the app and try again." };
+      if (params.get("redirect_status") === "failed") {
+        // Only decides what to show: the sheet goes back to the form. The link is now dead.
+        entry.verifying = false;
+        entry.state = rand();
+        const { step, url, actionHost, ...shown } = entry.prompt;
+        this.prompts.update(id, { ...shown, error: "Your bank did not verify the payment. You can try again or use another card." });
+        return { ok: false, message: "Your bank did not verify the payment. You can close this tab and return to the app to try again." };
+      }
+    }
     if (outcome === "cancel") {
       this.prompts.settle(id, "reject", fail("cancelled"));
       return { ok: false, message: "Payment cancelled. You can close this tab and return to the app." };

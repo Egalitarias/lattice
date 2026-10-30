@@ -203,6 +203,7 @@ export function createPayments({
       if (typeof b.order_ref !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(b.order_ref)) return refuse(res, 400, "invalid_request", "bad order_ref");
       if (typeof b.reference !== "string" || !/^pi_[A-Za-z0-9_]{1,64}$/.test(b.reference)) return refuse(res, 400, "invalid_request", "bad reference");
       if (typeof b.payment_method !== "string" || !/^pm_[A-Za-z0-9_]{1,64}$/.test(b.payment_method)) return refuse(res, 400, "invalid_request", "bad payment_method");
+      if (b.return_url !== undefined && !hostUrlOk(b.return_url, RETURN_PATH)) return refuse(res, 400, "invalid_request", "return_url must be the host's own");
 
       const order = getOwned(b.order_ref, who.subject);
       if (!order) return refuse(res, 404, "not_found", "No such order.");
@@ -212,7 +213,8 @@ export function createPayments({
 
       let intent;
       try {
-        intent = await stripe.paymentIntents.confirm(b.reference, { payment_method: b.payment_method });
+        // With a return_url, a card that needs 3-D Secure comes back with the address of the bank's page to send the user to.
+        intent = await stripe.paymentIntents.confirm(b.reference, { payment_method: b.payment_method, ...(b.return_url ? { return_url: b.return_url } : {}) });
       } catch (e) {
         if (e?.type === "StripeCardError" || e?.rawType === "card_error") {
           return refuse(res, 402, e.code ?? "card_declined", String(e.message ?? "Your card was declined.").slice(0, 200));
@@ -222,7 +224,8 @@ export function createPayments({
       }
       // What the host is told is a hint: the webhook decides whether the order is paid.
       const status = ["succeeded", "processing", "requires_action"].includes(intent.status) ? intent.status : "failed";
-      reply(res, 200, { status });
+      const actionUrl = status === "requires_action" && intent.next_action?.type === "redirect_to_url" ? intent.next_action.redirect_to_url?.url : undefined;
+      reply(res, 200, { status, ...(actionUrl ? { action_url: actionUrl } : {}) });
     } catch (e) {
       log(`payments confirm: ${e.stack ?? e}`);
       refuse(res, 500, "internal", "internal error");

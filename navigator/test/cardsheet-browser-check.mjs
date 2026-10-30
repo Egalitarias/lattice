@@ -110,6 +110,22 @@ try {
   check(await until("/declined/i.test(document.getElementById('auth-status').textContent)"), "a declined card is reported inline", await status());
   check(await js("document.getElementById('card-cvc').value === ''"), "and the security code is cleared");
 
+  await fill("4000 0025 0000 3155", "12", yy, "123");
+  await submit();
+  check(await until(`!!${dialogButton("/^Continue to your bank$/")}`), "a card that needs verification asks the user to go to their bank");
+  check(await js("document.getElementById('card-number') === null && !document.body.innerHTML.includes('3155')"), "and the card form, with what was typed, is gone");
+  await click(dialogButton("/^Continue to your bank$/"));
+  let bank;
+  for (let n = 0; n < 50 && !bank; n++) { bank = (await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).find((t) => t.type === "page" && /\/authenticate\/pi_/.test(t.url)); if (!bank) await sleep(100); }
+  check(!!bank, "the bank's page opens in its own window, from the click");
+  const bankWs = new WebSocket(bank.webSocketDebuggerUrl);
+  await new Promise((r) => (bankWs.onopen = r));
+  // A wrong answer from the bank, in that window, sends the user back to the form.
+  bankWs.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "document.querySelector('button[value=fail]').click()", userGesture: true } }));
+  check(await until("!!document.getElementById('card-number') && /did not verify/.test(document.getElementById('auth-status').textContent)"), "a failed verification returns to the form, with an explanation", await status());
+  bankWs.close();
+  check(await until("document.querySelector('dialog#auth').open"), "the sheet is still open for another card");
+
   await fill("4242 4242 4242 4242", "12", yy, "123");
   await submit();
   check(await until("!document.querySelector('dialog#auth').open"), "a good card closes the sheet");
