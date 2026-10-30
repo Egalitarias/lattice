@@ -20,7 +20,7 @@ const isLoopback = (h) => h === "localhost" || h === "127.0.0.1" || h === "[::1]
  * Fetch and verify an app. `dev` permits plain http on loopback and a manifest domain that
  * differs from the loopback address being fetched.
  */
-export async function fetchApp(url, { dev = false } = {}) {
+export async function fetchApp(url, { dev = false, strictDomain = false } = {}) {
   const u = new URL(url);
   if (u.protocol !== "https:" && !(dev && u.protocol === "http:" && isLoopback(u.hostname))) {
     throw new LoadError(`refusing ${u.protocol}//${u.host}: Lattice requires https (http is allowed on loopback with --dev)`);
@@ -40,7 +40,9 @@ export async function fetchApp(url, { dev = false } = {}) {
   const manifestProblem = checkManifest(manifest);
   if (manifestProblem) throw new LoadError("manifest does not match the schema:\n  " + manifestProblem);
   if (manifest.app !== u.hostname) {
-    if (!dev) throw new LoadError(`manifest is for ${manifest.app} but was served from ${u.hostname}`);
+    // In development a Node Navigator fetches from a loopback address while the manifest names the app's domain. A browser
+    // Navigator is served by the app's own origin, so there the two must always match: pass strictDomain.
+    if (!dev || strictDomain) throw new LoadError(`manifest is for ${manifest.app} but was served from ${u.hostname}`);
     console.warn(`navigator: --dev: accepting manifest for ${manifest.app} served from ${u.host}`);
   }
 

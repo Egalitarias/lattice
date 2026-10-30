@@ -4,7 +4,9 @@
 //   GET /.lattice/blob/<hash>                                  -> an immutable, content-addressed file
 //   POST <api.url path>/<method>                               -> typed RPC (see spec/rpc.md)
 //   GET /.well-known/lattice.json                              -> the manifest as JSON (discovery/debug)
-//   GET <any path>  (anything else)                            -> HTML fallback for non-Lattice clients
+//   GET <any path>  Accept: text/html (a browser)              -> the browser Navigator, if it has been built (spec/browser.md)
+//   GET /.lattice/navigator/<file>                             -> the browser Navigator's own files
+//   GET <any path>  (anything else)                            -> a plain HTML page for non-Lattice clients
 //
 // An app directory contains:
 //   manifest.json                     required
@@ -16,6 +18,7 @@
 //
 // Usage: node server.mjs --app ../examples/tasks [--port 8080] [--domain tasks.localhost]
 //                        [--oidc <issuer>,<client_id>[,<client_secret>]]... [--dev]
+//                        [--navigator-dist <dir> | --no-navigator]
 //                        [--stripe-key sk_test_...] [--stripe-webhook-secret whsec_...] [--stripe-api http://127.0.0.1:9200]
 
 import http from "node:http";
@@ -30,6 +33,55 @@ import { createRpc } from "./rpc.mjs";
 
 export const MANIFEST_TYPE = "application/vnd.lattice.app+cbor";
 const here = dirname(fileURLToPath(import.meta.url));
+
+// ---- The browser Navigator ----------------------------------------------------------------------
+
+const NAVIGATOR_PATH = "/.lattice/navigator/";
+const TYPES = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".wasm": "application/wasm", ".map": "application/json" };
+
+/** Read the built browser Navigator (navigator/browser/dist), or null if it has not been built. */
+export function loadNavigator(dir = resolve(here, "..", "navigator", "browser", "dist")) {
+  if (!existsSync(join(dir, "bootstrap.html"))) return null;
+  const files = new Map();
+  for (const f of readdirSync(dir)) {
+    const ext = f.slice(f.lastIndexOf("."));
+    if (TYPES[ext]) files.set(f, { bytes: readFileSync(join(dir, f)), type: TYPES[ext] });
+  }
+  return { bootstrap: readFileSync(join(dir, "bootstrap.html")), files };
+}
+
+// A page that runs the host must be cross-origin isolated: the component's thread blocks on shared memory.
+const ISOLATION = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+  "Cross-Origin-Resource-Policy": "same-origin",
+};
+
+/** The page's policy: scripts only from this origin, no eval, and workers only from this origin. */
+const pageCsp = (dev) =>
+  [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src https: data:",
+    "media-src https:",
+    // Identity providers' discovery documents and declared analytics processors are fetched from the page.
+    `connect-src 'self' https:${dev ? " http://127.0.0.1:* http://localhost:* http://*.localhost:*" : ""}`,
+    "worker-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+
+/**
+ * The scripts that run in workers carry their own policy. The component's thread gets `connect-src 'none'`: it
+ * cannot open a network connection at all, whatever the code in it tries. It needs blob: only to load the module the
+ * host generated from the hash-verified component, and 'wasm-unsafe-eval' to compile that component's WebAssembly.
+ */
+const WORKER_CSP = {
+  "component-worker.js": "default-src 'none'; script-src 'self' blob: 'wasm-unsafe-eval'; connect-src 'none'",
+  "transpile-worker.js": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'",
+};
 
 export function hashOf(bytes) {
   return "sha256-" + createHash("sha256").update(bytes).digest("base64url");
@@ -96,7 +148,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath, http, impl };
+  return { manifest, blobs, rpc, rpcPath, http, impl, dev };
 }
 
 const FALLBACK = (name) => `<!doctype html>
@@ -107,7 +159,7 @@ const FALLBACK = (name) => `<!doctype html>
 <code>Accept: ${MANIFEST_TYPE}</code>.</p>
 `;
 
-export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {} }) {
+export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {}, navigator = null, dev = false }) {
   const cbor = Buffer.from(encode(manifest));
   return http.createServer((req, res) => {
     const url = new URL(req.url, "http://placeholder");
@@ -115,6 +167,22 @@ export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {} 
 
     res.setHeader("Vary", "Accept");
     res.setHeader("X-Content-Type-Options", "nosniff");
+
+    // The browser Navigator's own files.
+    if (navigator && url.pathname.startsWith(NAVIGATOR_PATH)) {
+      const name = url.pathname.slice(NAVIGATOR_PATH.length);
+      const f = req.method === "GET" ? navigator.files.get(name) : null;
+      if (!f) return void res.writeHead(404).end();
+      res.writeHead(200, {
+        "Content-Type": f.type,
+        "Content-Length": f.bytes.length,
+        "Cache-Control": "no-cache",
+        ...ISOLATION,
+        ...(WORKER_CSP[name] ? { "Content-Security-Policy": WORKER_CSP[name] } : {}),
+        ...(name === "sw.js" ? { "Service-Worker-Allowed": "/" } : {}),
+      });
+      return void res.end(f.bytes);
+    }
 
     if (Object.hasOwn(routes, url.pathname)) {
       res.setHeader("Cache-Control", "no-store");
@@ -149,18 +217,33 @@ export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {} 
       return void res.end(cbor);
     }
 
+    // A browser: give it the host that runs this app, served by the app's own origin.
+    if (navigator && req.method === "GET" && accept.includes("text/html")) {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": navigator.bootstrap.length,
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": pageCsp(dev),
+        "Referrer-Policy": "no-referrer",
+        ...ISOLATION,
+      });
+      return void res.end(navigator.bootstrap);
+    }
+
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(FALLBACK(manifest.name ?? manifest.app));
   });
 }
 
 function args(argv) {
-  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false, stripe: null };
+  const out = { port: 8080, app: resolve(here, "..", "examples", "todo"), domain: undefined, oidc: [], dev: false, stripe: null, navigatorDist: undefined, noNavigator: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--port") out.port = Number(argv[++i]);
     else if (argv[i] === "--app") out.app = resolve(argv[++i]);
     else if (argv[i] === "--domain") out.domain = argv[++i];
     else if (argv[i] === "--dev") out.dev = true;
+    else if (argv[i] === "--navigator-dist") out.navigatorDist = resolve(argv[++i]);
+    else if (argv[i] === "--no-navigator") out.noNavigator = true;
     else if (argv[i] === "--stripe-key") (out.stripe ??= {}).secretKey = argv[++i];
     else if (argv[i] === "--stripe-webhook-secret") (out.stripe ??= {}).webhookSecret = argv[++i];
     else if (argv[i] === "--stripe-api") {
@@ -179,9 +262,11 @@ function args(argv) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const a = args(process.argv.slice(2));
   const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev, stripe: a.stripe });
-  createServer(app).listen(a.port, "127.0.0.1", () => {
+  const navigator = a.noNavigator ? null : loadNavigator(a.navigatorDist);
+  createServer({ ...app, navigator }).listen(a.port, "127.0.0.1", () => {
     console.log(`lattice server for ${app.manifest.app} on http://127.0.0.1:${a.port}`);
     console.log(`  entry ${app.manifest.entry}`);
     if (app.manifest.api) console.log(`  api   ${app.manifest.api.schema} at ${app.rpcPath}/<method>`);
+    console.log(navigator ? "  browser navigator: serving it to browsers" : "  browser navigator: not built (run: cd navigator && npm run build:browser)");
   });
 }

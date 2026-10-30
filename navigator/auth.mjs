@@ -24,7 +24,7 @@ export class AuthBroker {
    * @param uiOrigin      () => origin the user's browser is on, e.g. http://tasks.localhost:7070
    * @param prompts       shared Prompts (or pass `broadcast` and one is made)
    */
-  constructor({ manifest, tokenEndpoint, session, uiOrigin, prompts, broadcast, dev = false, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = fetch }) {
+  constructor({ manifest, tokenEndpoint, session, uiOrigin, prompts, broadcast, dev = false, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = (...args) => fetch(...args) }) {
     const app = { name: manifest.name ?? manifest.app, domain: manifest.app };
     Object.assign(this, { manifest, tokenEndpoint, session, uiOrigin, dev, fetchImpl });
     this.prompts = prompts ?? new Prompts({ broadcast, app, timeoutMs });

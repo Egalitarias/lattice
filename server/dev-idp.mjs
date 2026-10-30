@@ -38,7 +38,8 @@ export async function startIdp({ port = 0, clientId = "lattice-dev", clientSecre
   };
 
   const send = (res, status, body, type = "application/json", headers = {}) => {
-    res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store", ...headers });
+    // The discovery document and keys are public. A browser Navigator fetches them from the app's page.
+    res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
   };
   const page = (res, status, html) =>

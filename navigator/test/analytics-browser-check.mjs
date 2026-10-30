@@ -11,7 +11,7 @@ import { existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadApp, createServer } from "../../server/server.mjs";
+import { loadApp, createServer, loadNavigator } from "../../server/server.mjs";
 import { startNavigator } from "../navigator.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,16 +26,27 @@ const exe = [
 ].filter(Boolean).find((p) => existsSync(p));
 if (!exe) { console.error("no Edge/Chrome found; set BROWSER"); process.exit(2); }
 
+// `--browser-mode` runs the same scenarios against the browser Navigator that the app's own origin serves
+// (no Navigator process at all) instead of the Node Navigator.
+const mode = process.argv.includes("--browser-mode") ? "browser" : "node";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
 const check = (ok, label, detail = "") => { console.log(`${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : "  -> " + detail}`); if (!ok) failed++; };
 
 const app = await loadApp({ appDir: resolve(here, "..", "..", "examples", "tasks"), dev: true, log: () => {} });
-const origin = createServer(app);
+const origin = createServer({ ...app, navigator: mode === "browser" ? loadNavigator() : null });
 const originPort = await new Promise((ok) => origin.listen(0, "127.0.0.1", () => ok(origin.address().port)));
 const dataDir = mkdtempSync(join(tmpdir(), "nav-anbrowser-"));
-const nav = await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir, cacheDir: join(tmpdir(), "lattice-navigator-test-cache"), log: () => {} });
+const nav = mode === "node" ? await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir, cacheDir: join(tmpdir(), "lattice-navigator-test-cache"), log: () => {} }) : null;
+const uiOrigin = mode === "node" ? nav.uiOrigin : `http://tasks.localhost:${originPort}`;
 const collected = () => app.impl.collector.events;
+// What the check needs from Navigator's internals: directly in Node mode, through the loopback-only debug hook in the page otherwise.
+let js; // assigned once the browser is connected
+const an = {
+  flush: () => (mode === "node" ? nav.analytics.flush() : js("latticeDebug.controller.analytics.flush()")),
+  level: () => (mode === "node" ? nav.analytics.level : js("latticeDebug.controller.analytics.level")),
+  clientId: () => (mode === "node" ? nav.analytics.clientId() : js("latticeDebug.controller.analytics.clientId()")),
+};
 
 const debugPort = 9990 + Math.floor(Math.random() * 9);
 const proc = spawn(exe, [
@@ -61,7 +72,7 @@ try {
     if (m.method === "Log.entryAdded" && m.params.entry.level === "error") problems.push(`${m.params.entry.text} ${m.params.entry.url ?? ""}`);
   };
   const cdp = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
-  const js = async (expr) => {
+  js = async (expr) => {
     const r = await cdp("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true, userGesture: true });
     if (r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description ?? "eval failed");
     return r.result.result.value;
@@ -85,7 +96,7 @@ try {
   };
 
   await cdp("Runtime.enable"); await cdp("Log.enable"); await cdp("Page.enable");
-  await cdp("Page.navigate", { url: `${nav.uiOrigin}/` });
+  await cdp("Page.navigate", { url: `${uiOrigin}/` });
   check(await until("!!document.querySelector('h1')"), "page loads");
 
   // The control is part of the host's chrome, outside the app, with the safe default.
@@ -100,14 +111,14 @@ try {
 
   // At the default level using the app sends nothing product-level.
   await addTask("default level task");
-  await nav.analytics.flush();
+  await an.flush();
   check(collected().length === 0, "at the default level the collector received nothing", JSON.stringify(collected().map((e) => e.name)));
 
   // Raise the level in the chrome.
   check(await setLevel("anonymous"), "choosing Anonymous in the chrome changes the level");
-  check(nav.analytics.level === "anonymous", "and Navigator itself agrees");
+  check((await an.level()) === "anonymous", "and Navigator itself agrees");
   await addTask("anonymous level task");
-  await nav.analytics.flush();
+  await an.flush();
   check(collected().some((e) => e.name === "task_added" && e.level === "anonymous" && e.client === null), "the collector received task_added, with no client id");
   check(!/default level task|anonymous level task/.test(JSON.stringify(collected())), "and no task titles", JSON.stringify(collected()));
   await reopen();
@@ -125,19 +136,19 @@ try {
   await js(`${panel}.open = true`);
   await sleep(200);
   check(await js(`[...${panel}.querySelectorAll('button')].some((b) => b.textContent === 'Reset my analytics ID')`), "Full shows a button to reset the analytics ID");
-  const id1 = nav.analytics.clientId();
+  const id1 = await an.clientId();
   await addTask("full level task");
-  await nav.analytics.flush();
+  await an.flush();
   check(collected().filter((e) => e.client === id1).length > 0, "events now carry the client id");
   await js(`[...${panel}.querySelectorAll('button')].find((b) => b.textContent === 'Reset my analytics ID').click()`);
   await sleep(400);
-  check(nav.analytics.clientId() !== id1, "resetting changes the id");
+  check((await an.clientId()) !== id1, "resetting changes the id");
 
   // Off stops everything.
   check(await setLevel("off"), "choosing Off works");
   const before = collected().length;
   await addTask("off level task");
-  await nav.analytics.flush();
+  await an.flush();
   check(collected().length === before, "nothing more is sent once it is off");
   check(await js(`![...${panel}.querySelectorAll('button')].some((b) => b.textContent === 'Reset my analytics ID')`), "the reset button is only shown at Full");
 
@@ -146,7 +157,7 @@ try {
   ws.close();
 } finally {
   proc.kill();
-  await nav.close();
+  await nav?.close();
   await new Promise((ok) => { origin.close(ok); origin.closeAllConnections?.(); });
   rmSync(dataDir, { recursive: true, force: true });
 }

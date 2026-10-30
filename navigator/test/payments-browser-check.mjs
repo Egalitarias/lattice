@@ -11,7 +11,7 @@ import { existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadApp, createServer } from "../../server/server.mjs";
+import { loadApp, createServer, loadNavigator } from "../../server/server.mjs";
 import { startIdp } from "../../server/dev-idp.mjs";
 import { startPsp } from "../../server/dev-psp.mjs";
 import { startNavigator } from "../navigator.mjs";
@@ -28,6 +28,9 @@ const exe = [
 ].filter(Boolean).find((p) => existsSync(p));
 if (!exe) { console.error("no Edge/Chrome found; set BROWSER"); process.exit(2); }
 
+// `--browser-mode` runs the same scenarios against the browser Navigator that the app's own origin serves
+// (no Navigator process at all) instead of the Node Navigator.
+const mode = process.argv.includes("--browser-mode") ? "browser" : "node";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
 const check = (ok, label, detail = "") => { console.log(`${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : "  -> " + detail}`); if (!ok) failed++; };
@@ -43,11 +46,12 @@ const app = await loadApp({
   stripe: { secretKey: psp.secretKey, webhookSecret: psp.webhookSecret, api: { protocol: "http", host: "127.0.0.1", port: psp.port } },
   log: () => {},
 });
-const origin = createServer(app);
+const origin = createServer({ ...app, navigator: mode === "browser" ? loadNavigator() : null });
 const originPort = await listen(origin);
 psp.configure({ webhookUrl: `http://127.0.0.1:${originPort}/pay/webhook` });
 const dataDir = mkdtempSync(join(tmpdir(), "nav-paybrowser-"));
-const nav = await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir, cacheDir: join(tmpdir(), "lattice-navigator-test-cache"), log: () => {} });
+const nav = mode === "node" ? await startNavigator({ url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir, cacheDir: join(tmpdir(), "lattice-navigator-test-cache"), log: () => {} }) : null;
+const uiOrigin = mode === "node" ? nav.uiOrigin : `http://tasks.localhost:${originPort}`;
 
 const debugPort = 9950 + Math.floor(Math.random() * 40);
 const proc = spawn(exe, [
@@ -103,7 +107,7 @@ try {
     options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
   });
 
-  await cdp("Page.navigate", { url: `${nav.uiOrigin}/` });
+  await cdp("Page.navigate", { url: `${uiOrigin}/` });
   check(await until("!!document.querySelector('h1')"), "page loads");
   check(await js("![...document.querySelectorAll('#app button')].some((b) => /Upgrade/.test(b.textContent))"), "signed out: the app offers no Upgrade button");
 
@@ -189,7 +193,7 @@ try {
   ws.close();
 } finally {
   proc.kill();
-  await nav.close();
+  await nav?.close();
   await new Promise((ok) => { origin.close(ok); origin.closeAllConnections?.(); });
   await idp.close();
   await psp.close();

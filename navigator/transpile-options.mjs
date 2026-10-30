@@ -34,3 +34,6 @@ export function generateOptions(name = "app") {
     emitConditionalSuspendingWasm: true,
   };
 }
+
+/** Bump when generateOptions changes or the generator is upgraded: cached transpilations are keyed by it. */
+export const TRANSPILE_VERSION = "1";

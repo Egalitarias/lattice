@@ -93,7 +93,7 @@ export class Analytics {
    * @param processors manifest processors with their endpoints already resolved to reachable addresses
    * @param kv         the profile's store: the user's level and the client id live here
    */
-  constructor({ manifest, processors, kv, dev = false, log = () => {}, fetchImpl = fetch, now = () => Date.now(), flushMs = 5000, backoffMs = [1000, 4000, 16000] }) {
+  constructor({ manifest, processors, kv, dev = false, log = () => {}, fetchImpl = (...args) => fetch(...args), now = () => Date.now(), flushMs = 5000, backoffMs = [1000, 4000, 16000] }) {
     Object.assign(this, { manifest, kv, dev, log, fetchImpl, now, flushMs, backoffMs });
     this.catalog = new Map((manifest.analytics?.events ?? []).map((e) => [e.name, e]));
     this.processors = [];

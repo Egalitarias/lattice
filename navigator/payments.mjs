@@ -28,7 +28,7 @@ export class PaymentBroker {
    * @param prompts    shared Prompts
    * @param dev        allow plain-http checkout on loopback (development processors)
    */
-  constructor({ manifest, endpoint, session, uiOrigin, prompts, dev = false, timeoutMs = PAY_TIMEOUT_MS, fetchImpl = fetch }) {
+  constructor({ manifest, endpoint, session, uiOrigin, prompts, dev = false, timeoutMs = PAY_TIMEOUT_MS, fetchImpl = (...args) => fetch(...args) }) {
     Object.assign(this, { manifest, endpoint, session, uiOrigin, prompts, dev, timeoutMs, fetchImpl });
   }
 

@@ -1,2 +1,4 @@
 .navigator/
 .probe/
+browser/dist/
+browser/gen/

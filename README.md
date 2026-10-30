@@ -128,10 +128,22 @@ cd navigator && node test/payments-browser-check.mjs                  # a full p
 cd navigator && node test/analytics-browser-check.mjs                 # the Privacy control in Edge/Chrome
 ```
 
+### Browser mode
+
+```
+cd navigator && npm run build:browser        # once
+cd server && node server.mjs --app ../examples/tasks --port 8080 --dev
+# open http://tasks.localhost:8080/ in a browser: no separate Navigator process
+```
+
+Check it with `node test/browser-mode-check.mjs`, or run the other browser checks with `--browser-mode`.
+
 ## Prototype limits
 
-- Lattice Navigator runs the component in a Node worker thread and shows the UI in a local browser page. A browser-only Lattice Navigator (service
-  worker plus transpiled WASM) is not built yet.
+- Two hosts exist: the Node Navigator (component in a worker thread, UI in a local page) and the browser Navigator
+  (served by the app's own origin, component transpiled to JS in a Worker; see `spec/browser.md`). The browser one
+  removes the `*.localhost`-only limits below for passkeys and payments (non-loopback use needs TLS), but trusts the
+  origin that serves it; its component storage is `localStorage`.
 - Implemented host imports: `log`, `storage`, `rpc` (request/response only). The rest of `spec/wit/capabilities.wit`
   is specified, not implemented.
 - Auth: OIDC and passkeys work end to end, but accounts and sessions live in the origin's memory, there is no account

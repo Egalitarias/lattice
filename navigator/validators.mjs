@@ -10,6 +10,7 @@ import addFormats from "ajv-formats";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatAjvErrors } from "./validators-format.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ajv = new Ajv2020({ strict: false, allErrors: true });
@@ -18,7 +19,7 @@ const compile = (name) => ajv.compile(JSON.parse(readFileSync(join(here, "..", "
 const manifest = compile("manifest.schema.json");
 const api = compile("api.schema.json");
 
-const text = (validate) => ajv.errorsText(validate.errors, { separator: "\n  " });
+const text = (validate) => formatAjvErrors(validate.errors);
 
 export const checkManifest = (doc) => (manifest(doc) ? null : text(manifest));
 export const checkApiDescription = (doc) => (api(doc) ? null : text(api));
