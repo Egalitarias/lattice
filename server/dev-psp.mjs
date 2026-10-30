@@ -6,6 +6,11 @@
 //
 //   POST /v1/checkout/sessions        create a Checkout Session (form-encoded, Bearer secret key)
 //   GET  /v1/checkout/sessions/:id    retrieve it
+//   POST /v1/payment_methods          tokenise a card (form-encoded, Bearer PUBLISHABLE key, CORS enabled): what a host-drawn
+//                                     card sheet calls. Test cards: 4242 4242 4242 4242 pays, 4000 0000 0000 0002 is declined,
+//                                     4000 0025 0000 3155 asks for extra authentication
+//   POST /v1/payment_intents          create an intent (secret key)
+//   POST /v1/payment_intents/:id/confirm   confirm it with a payment method (secret key)
 //   GET  /c/pay/:id                   the hosted payment page (it is a web page: processors are legacy sites)
 //   POST /c/pay/:id                   the page's buttons: pay | decline | cancel
 //
@@ -45,15 +50,29 @@ export function signStripe(payload, secret, t = Math.floor(Date.now() / 1000)) {
   return `t=${t},v1=${createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex")}`;
 }
 
-export async function startPsp({ port = 0, secretKey = "sk_test_dev", webhookSecret = "whsec_dev", webhookUrl = null, webhookDelayMs = 0, now = () => Date.now() } = {}) {
+export const DEV_PUBLISHABLE_KEY = "pk_test_latticedev";
+
+const luhn = (n) => {
+  let sum = 0;
+  for (let i = 0; i < n.length; i++) {
+    let d = Number(n[n.length - 1 - i]);
+    if (i % 2) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  return sum % 10 === 0;
+};
+
+export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishableKey = DEV_PUBLISHABLE_KEY, webhookSecret = "whsec_dev", webhookUrl = null, webhookDelayMs = 0, now = () => Date.now() } = {}) {
   const sessions = new Map();
+  const intents = new Map();
+  const methods = new Map(); // pm_ id -> { behaviour, brand, last4 }  (the number itself is never kept)
   const idempotency = new Map(); // key -> { fingerprint, sessionId }
   const state = { webhookUrl, webhookSecret, webhookDelayMs, pending: [], delivered: [] };
   let base;
 
   const json = (res, status, body, headers = {}) => {
     const text = JSON.stringify(body);
-    res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(text), ...headers });
+    res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(text), "Access-Control-Allow-Origin": "*", ...headers });
     res.end(text);
   };
   const stripeError = (res, status, type, message, extra = {}) => json(res, status, { error: { type, message, ...extra } });
@@ -97,8 +116,81 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", webhookSec
 
       // ---- The API (authenticated) ---------------------------------------------------------------
       if (url.pathname.startsWith("/v1/")) {
+        // A browser calling the tokenisation endpoint from the app's page is cross-origin: allow it, for that endpoint only.
+        if (req.method === "OPTIONS" && url.pathname === "/v1/payment_methods") {
+          return void res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, content-type", "Access-Control-Allow-Methods": "POST", "Access-Control-Max-Age": "600" }).end();
+        }
         const auth = req.headers.authorization ?? "";
+
+        // Tokenising a card is the one call a publishable key may make. It never accepts the secret key's other powers.
+        if (req.method === "POST" && url.pathname === "/v1/payment_methods") {
+          if (auth !== `Bearer ${publishableKey}`) return stripeError(res, 401, "invalid_request_error", "Invalid API Key provided.");
+          const p = nest(new URLSearchParams(await body(req)));
+          const bad = (m, param) => stripeError(res, 400, "invalid_request_error", m, { param });
+          if (p.type !== "card" || !p.card) return bad("Only type=card is supported by the dev processor.", "type");
+          const number = String(p.card.number ?? "").replace(/[ -]/g, "");
+          if (!/^\d{12,19}$/.test(number) || !luhn(number)) return stripeError(res, 402, "card_error", "Your card number is incorrect.", { code: "incorrect_number", param: "number" });
+          const month = Number(p.card.exp_month), year = Number(p.card.exp_year);
+          const nowD = new Date(now());
+          if (!Number.isInteger(month) || month < 1 || month > 12) return stripeError(res, 402, "card_error", "Your card's expiration month is invalid.", { code: "invalid_expiry_month", param: "exp_month" });
+          if (!Number.isInteger(year) || year < nowD.getUTCFullYear() || (year === nowD.getUTCFullYear() && month < nowD.getUTCMonth() + 1)) return stripeError(res, 402, "card_error", "Your card has expired.", { code: "expired_card", param: "exp_year" });
+          if (!/^\d{3,4}$/.test(String(p.card.cvc ?? ""))) return stripeError(res, 402, "card_error", "Your card's security code is invalid.", { code: "invalid_cvc", param: "cvc" });
+          const id = `pm_${rid(24)}`;
+          const behaviour = number === "4000000000000002" ? "decline" : number === "4000002500003155" ? "authenticate" : "pay";
+          methods.set(id, { behaviour, last4: number.slice(-4) });
+          return json(res, 200, { id, object: "payment_method", type: "card", livemode: false, card: { brand: "visa", last4: number.slice(-4), exp_month: month, exp_year: year } });
+        }
+
         if (auth !== `Bearer ${secretKey}`) return stripeError(res, 401, "invalid_request_error", "Invalid API Key provided.");
+
+        if (req.method === "POST" && url.pathname === "/v1/payment_intents") {
+          const raw = await body(req);
+          const p = nest(new URLSearchParams(raw));
+          const amount = Number(p.amount);
+          if (!Number.isInteger(amount) || amount < 1) return stripeError(res, 400, "invalid_request_error", "Invalid positive integer", { param: "amount" });
+          if (!/^[a-z]{3}$/.test(p.currency ?? "")) return stripeError(res, 400, "invalid_request_error", "Invalid currency.", { param: "currency" });
+          const key = req.headers["idempotency-key"];
+          if (key && idempotency.has(key)) {
+            const prior = idempotency.get(key);
+            if (prior.fingerprint !== raw) return stripeError(res, 400, "idempotency_error", "Keys for idempotent requests can only be used with the same parameters they were first used with.");
+            return json(res, 200, intents.get(prior.sessionId));
+          }
+          const id = `pi_${rid(24)}`;
+          const intent = { id, object: "payment_intent", amount, amount_received: 0, currency: p.currency, status: "requires_payment_method", metadata: p.metadata ?? {}, payment_method: null, client_secret: `${id}_secret_${rid(16)}`, livemode: false, created: Math.floor(now() / 1000) };
+          intents.set(id, intent);
+          if (key) idempotency.set(key, { fingerprint: raw, sessionId: id });
+          return json(res, 200, intent);
+        }
+
+        const pi = url.pathname.match(/^\/v1\/payment_intents\/(pi_[A-Za-z0-9]+)(\/confirm)?$/);
+        if (pi) {
+          const intent = intents.get(pi[1]);
+          if (!intent) return stripeError(res, 404, "invalid_request_error", `No such payment_intent: '${pi[1]}'`);
+          if (req.method === "GET" && !pi[2]) return json(res, 200, intent);
+          if (req.method === "POST" && pi[2]) {
+            const p = nest(new URLSearchParams(await body(req)));
+            if (intent.status === "succeeded") return stripeError(res, 400, "invalid_request_error", "This PaymentIntent has already succeeded.", { code: "payment_intent_unexpected_state" });
+            const pm = methods.get(p.payment_method);
+            if (!pm) return stripeError(res, 400, "invalid_request_error", `No such PaymentMethod: '${p.payment_method}'`, { param: "payment_method" });
+            intent.payment_method = p.payment_method;
+            if (pm.behaviour === "decline") {
+              intent.status = "requires_payment_method";
+              return stripeError(res, 402, "card_error", "Your card was declined.", { code: "card_declined", decline_code: "generic_decline", payment_intent: { id: intent.id } });
+            }
+            if (pm.behaviour === "authenticate") {
+              intent.status = "requires_action";
+              intent.next_action = { type: "use_stripe_sdk" };
+              return json(res, 200, intent);
+            }
+            intent.status = "succeeded";
+            intent.amount_received = intent.amount;
+            const ev = event("payment_intent.succeeded", { ...intent });
+            if (state.webhookDelayMs === 0) await deliver(ev).catch(() => {});
+            else if (Number.isFinite(state.webhookDelayMs)) setTimeout(() => deliver(ev).catch(() => {}), state.webhookDelayMs);
+            else state.pending.push(ev);
+            return json(res, 200, intent);
+          }
+        }
 
         if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
           const raw = await body(req);
@@ -205,6 +297,8 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", webhookSec
     url: base,
     port: server.address().port,
     secretKey,
+    publishableKey,
+    intents,
     get webhookSecret() { return state.webhookSecret; },
     sessions,
     delivered: state.delivered,

@@ -2,7 +2,8 @@
 //
 // createPayments() gives an origin:
 //   - orders it creates itself, from its own prices (never from the client)
-//   - sessionsEndpoint: the host calls this to get a checkout URL and the order summary
+//   - sessionsEndpoint: the host calls this to get a checkout URL (or, for a host-drawn card sheet, a PaymentIntent) and the order summary
+//   - confirmEndpoint:  the host calls this with a tokenised card (card sheet only); the server confirms the intent
 //   - webhookEndpoint:  Stripe calls this; the ONLY place an order becomes paid
 //   - onPaid(fn):       fulfilment hook, called once per order
 //
@@ -23,6 +24,8 @@ export function createPayments({
   originAllowed, // (origin) => boolean: where the host's UI may be reached
   secretKey,
   webhookSecret,
+  publishableKey, // offer the host-drawn card sheet (needs processorApi too); the manifest must declare the same key
+  processorApi, // base URL of the processor's API that the host may call with the publishable key, e.g. https://api.stripe.com
   api, // optional { host, port, protocol } to point the Stripe client at a stand-in (development)
   identify, // (sessionToken) => { subject } | null
   now = () => Date.now(),
@@ -52,7 +55,7 @@ export function createPayments({
       id: "ord_" + randomBytes(12).toString("base64url"),
       owner, currency, items: items.map((i) => ({ ...i })), total_minor: total,
       status: "created", // created -> pending (session made) -> paid | failed | expired
-      sessionIds: [], paidSessionId: null, attempts: 0, createdAt: now(), paidAt: null,
+      sessionIds: [], intentIds: [], paidSessionId: null, attempts: 0, createdAt: now(), paidAt: null,
     };
     orders.set(order.id, order);
     return order;
@@ -114,6 +117,34 @@ export function createPayments({
 
       // The amount comes from the order we hold, never from the request.
       order.attempts++;
+
+      // The host offers to draw the card form itself, and we are set up for it.
+      if (Array.isArray(b.methods) && b.methods.includes("card_sheet") && publishableKey && processorApi) {
+        let intent;
+        try {
+          intent = await stripe.paymentIntents.create(
+            { amount: order.total_minor, currency: order.currency.toLowerCase(), payment_method_types: ["card"], metadata: { order_id: order.id } },
+            { idempotencyKey: `lattice-pi-${order.id}-${new URL(b.return_url).searchParams.get("state")}` }
+          );
+        } catch (e) {
+          log(`payments: could not create a payment intent for ${order.id}: ${e.message}`);
+          return refuse(res, 502, "processor_unavailable", "The payment processor could not be reached. Please try again.");
+        }
+        if (intent.amount !== order.total_minor || intent.currency !== order.currency.toLowerCase()) {
+          log(`payments: intent for ${order.id} disagrees with the order (${intent.amount} ${intent.currency})`);
+          return refuse(res, 502, "processor_unavailable", "The payment processor returned an unexpected amount.");
+        }
+        if (!order.intentIds.includes(intent.id)) order.intentIds.push(intent.id);
+        if (order.status === "created") order.status = "pending";
+        return reply(res, 200, {
+          handler: "stripe-card",
+          reference: intent.id,
+          publishable_key: publishableKey,
+          api: processorApi,
+          summary: { currency: order.currency, total_minor: order.total_minor, items: order.items.map(({ label, amount_minor, quantity }) => ({ label, amount_minor, quantity })) },
+        });
+      }
+
       let session;
       try {
         session = await stripe.checkout.sessions.create(
@@ -151,6 +182,49 @@ export function createPayments({
       });
     } catch (e) {
       log(`payments sessions: ${e.stack ?? e}`);
+      refuse(res, 500, "internal", "internal error");
+    }
+  }
+
+  // ---- Host-facing: confirm an intent with a tokenised card -----------------------------------
+
+  async function confirmEndpoint(req, res) {
+    try {
+      if (req.method !== "POST") return refuse(res, 405, "invalid_request", "POST only");
+      if (!/^application\/json\b/.test(req.headers["content-type"] ?? "")) return refuse(res, 415, "invalid_request", "expected application/json");
+      const raw = await readBody(req, MAX_JSON);
+      if (!raw) return refuse(res, 413, "invalid_request", "request too large");
+      let b;
+      try { b = JSON.parse(raw.toString("utf8")); } catch { return refuse(res, 400, "invalid_request", "bad JSON"); }
+      if (!b || typeof b !== "object" || Array.isArray(b)) return refuse(res, 400, "invalid_request", "bad JSON");
+
+      const who = identify(req.headers["lattice-session"]);
+      if (!who) return refuse(res, 401, "unauthorized", "Sign in to pay.");
+      if (typeof b.order_ref !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(b.order_ref)) return refuse(res, 400, "invalid_request", "bad order_ref");
+      if (typeof b.reference !== "string" || !/^pi_[A-Za-z0-9_]{1,64}$/.test(b.reference)) return refuse(res, 400, "invalid_request", "bad reference");
+      if (typeof b.payment_method !== "string" || !/^pm_[A-Za-z0-9_]{1,64}$/.test(b.payment_method)) return refuse(res, 400, "invalid_request", "bad payment_method");
+
+      const order = getOwned(b.order_ref, who.subject);
+      if (!order) return refuse(res, 404, "not_found", "No such order.");
+      if (order.status === "paid") return refuse(res, 409, "already_paid", "That order has already been paid.");
+      // Only an intent we made for this order, which the owner is asking about.
+      if (!order.intentIds.includes(b.reference)) return refuse(res, 404, "not_found", "No such payment.");
+
+      let intent;
+      try {
+        intent = await stripe.paymentIntents.confirm(b.reference, { payment_method: b.payment_method });
+      } catch (e) {
+        if (e?.type === "StripeCardError" || e?.rawType === "card_error") {
+          return refuse(res, 402, e.code ?? "card_declined", String(e.message ?? "Your card was declined.").slice(0, 200));
+        }
+        log(`payments: could not confirm ${b.reference} for ${order.id}: ${e.message}`);
+        return refuse(res, 502, "processor_unavailable", "The payment processor could not be reached. Please try again.");
+      }
+      // What the host is told is a hint: the webhook decides whether the order is paid.
+      const status = ["succeeded", "processing", "requires_action"].includes(intent.status) ? intent.status : "failed";
+      reply(res, 200, { status });
+    } catch (e) {
+      log(`payments confirm: ${e.stack ?? e}`);
       refuse(res, 500, "internal", "internal error");
     }
   }
@@ -193,6 +267,34 @@ export function createPayments({
       const session = event.data?.object;
       const order = session && typeof session.client_reference_id === "string" ? orders.get(session.client_reference_id) : null;
 
+      // A card paid through the host's own sheet: a PaymentIntent, found through the order id we put in its metadata.
+      if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
+        const intent = session;
+        const io = typeof intent?.metadata?.order_id === "string" ? orders.get(intent.metadata.order_id) : null;
+        if (!io) { log(`payments webhook: ${event.type} for an unknown order`); return ack(res); }
+        if (!io.intentIds.includes(intent.id)) { log(`payments webhook: intent ${intent.id} is not one of ${io.id}'s`); return ack(res); }
+        if (event.type === "payment_intent.payment_failed") {
+          if (io.status !== "paid") io.status = "failed"; // `paid` is terminal
+          return ack(res);
+        }
+        if (intent.amount !== io.total_minor || intent.amount_received !== io.total_minor || String(intent.currency).toLowerCase() !== io.currency.toLowerCase()) {
+          log(`payments webhook: amount mismatch on ${io.id}: ${intent.amount_received}/${intent.amount} ${intent.currency} vs ${io.total_minor} ${io.currency}`);
+          return ack(res);
+        }
+        if (intent.status !== "succeeded") return ack(res);
+        if (io.status === "paid") {
+          if (intent.id !== io.paidSessionId) log(`payments: ${io.id} was paid twice (${io.paidSessionId} and ${intent.id}); one needs a refund`);
+          return ack(res);
+        }
+        io.status = "paid";
+        io.paidSessionId = intent.id;
+        io.paidAt = now();
+        for (const fn of paidHooks) {
+          try { await fn({ ...io }); } catch (e) { log(`payments: fulfilment hook failed for ${io.id}: ${e.message}`); }
+        }
+        return ack(res);
+      }
+
       switch (event.type) {
         case "checkout.session.completed":
         case "checkout.session.async_payment_succeeded": {
@@ -231,5 +333,5 @@ export function createPayments({
     }
   }
 
-  return { createOrder, getOwned, sessionsEndpoint, webhookEndpoint, onPaid: (fn) => void paidHooks.push(fn), orders, stripe };
+  return { createOrder, getOwned, sessionsEndpoint, confirmEndpoint, webhookEndpoint, onPaid: (fn) => void paidHooks.push(fn), orders, stripe };
 }

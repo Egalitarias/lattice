@@ -30,14 +30,14 @@ export const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
 
 // ---- A complete stack: dev IdP + tasks origin + Navigator ---------------------------------------
 
-export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, pspOptions = {}, analyticsOptions } = {}) {
+export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, cardSheet = false, pspOptions = {}, analyticsOptions } = {}) {
   const idp = await startIdp({ clientSecret });
   const psp = wantPsp ? await startPsp(pspOptions) : null;
   const app = await loadApp({
     appDir: tasksDir,
     oidc: trustIdp ? [{ issuer: idp.issuer, clientId: idp.clientId, clientSecret }] : [],
     dev: true,
-    stripe: psp ? { secretKey: psp.secretKey, webhookSecret: psp.webhookSecret, api: { protocol: "http", host: "127.0.0.1", port: psp.port } } : null,
+    stripe: psp ? { secretKey: psp.secretKey, ...(cardSheet ? { publishableKey: psp.publishableKey } : {}), webhookSecret: psp.webhookSecret, api: { protocol: "http", host: "127.0.0.1", port: psp.port } } : null,
     log: quiet,
   });
   if (requires) app.manifest.capabilities = { requires };

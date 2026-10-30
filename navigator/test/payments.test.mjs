@@ -332,7 +332,7 @@ test("host: the request to the server is built by the host, and server refusals 
   await assert.rejects(down.request("ord_1"), rejects("unavailable"));
   const none = new PaymentBroker({ manifest: { app: "tasks.localhost", payments: { handlers: ["stripe"] } }, endpoint: null, session: { token: () => "t" }, uiOrigin: () => "http://x", prompts: new Prompts({ broadcast: quiet, app: {}, timeoutMs: 100 }) });
   await assert.rejects(none.request("ord_1"), rejects("unavailable"));
-  assert.deepEqual(Object.keys(HANDLERS), ["stripe"]);
+  assert.deepEqual(Object.keys(HANDLERS), ["stripe", "stripe-card"]);
 });
 
 // ---- What the server accepts from the host ------------------------------------------------------

@@ -26,6 +26,8 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
       secretKey: stripe.secretKey,
       webhookSecret: stripe.webhookSecret,
       api: stripe.api,
+      publishableKey: stripe.publishableKey, // offers the host-drawn card sheet when set
+      processorApi: stripe.processorApi,
       identify: (token) => auth.identify(token),
       log,
     });
@@ -124,6 +126,7 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
   if (payments) {
     const base = new URL(manifest.payments.server).pathname.replace(/\/$/, "");
     http[`${base}/sessions`] = payments.sessionsEndpoint;
+    http[`${base}/confirm`] = payments.confirmEndpoint;
     http[`${base}/webhook`] = payments.webhookEndpoint;
   }
   return { handlers, http, auth, payments, pro, collector };

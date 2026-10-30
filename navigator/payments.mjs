@@ -1,4 +1,4 @@
-// The host's side of payments (spec/payments.md): hosted checkout.
+// The host's side of payments (spec/payments.md): hosted checkout, and a card sheet the host draws itself.
 //
 // The app names an order. This broker asks the app's own server what the order is and where to pay,
 // validates the answer, shows the user a sheet drawn from it, opens the processor's page, and waits
@@ -15,7 +15,41 @@ const isLoopbackHost = (h) => h === "localhost" || h === "127.0.0.1" || h === "[
 /** What each processor the host knows may be: the hosts it may send the user to. */
 export const HANDLERS = {
   stripe: { checkoutHosts: ["checkout.stripe.com"] },
+  // The host draws the card form and tokenises the card itself, at the processor's API, with the merchant's publishable key.
+  "stripe-card": { apiHosts: ["api.stripe.com"], card: true },
 };
+
+const MAX_CARD_ATTEMPTS = 5;
+const CARD_TIMEOUT_MS = 15_000;
+
+/** The Luhn check digit: catches a mistyped number before anything is sent. */
+const luhnOk = (n) => {
+  let sum = 0;
+  for (let i = 0; i < n.length; i++) {
+    let d = Number(n[n.length - 1 - i]);
+    if (i % 2) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  return sum % 10 === 0;
+};
+
+/** Validate what the user typed. Returns { ok: true, card } with clean values, or { ok: false, error }. */
+export function checkCard(input, now = new Date()) {
+  const number = String(input?.number ?? "").replace(/[ -]/g, "");
+  if (!/^\d{12,19}$/.test(number) || !luhnOk(number)) return { ok: false, error: "That card number does not look right. Check it and try again." };
+  const month = Number(input.exp_month);
+  let year = Number(input.exp_year);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return { ok: false, error: "The expiry month must be 1 to 12." };
+  if (Number.isInteger(year) && year < 100) year += 2000;
+  const y = now.getUTCFullYear(), m = now.getUTCMonth() + 1;
+  if (!Number.isInteger(year) || year > y + 25 || year < y || (year === y && month < m)) return { ok: false, error: "That card has expired, or the expiry year is not valid." };
+  const cvc = String(input.cvc ?? "");
+  if (!/^\d{3,4}$/.test(cvc)) return { ok: false, error: "The security code is 3 or 4 digits." };
+  return { ok: true, card: { number, exp_month: month, exp_year: year, cvc } };
+}
+
+/** Text from the processor or server that is safe to show: no long digit runs, short. */
+const safeMessage = (m, fallback) => (typeof m === "string" && m ? m.replace(/\d[\d \-]{5,}\d/g, "[number]").slice(0, 150) : fallback);
 
 const rand = () => randomToken(32);
 
@@ -30,6 +64,20 @@ export class PaymentBroker {
    */
   constructor({ manifest, endpoint, session, uiOrigin, prompts, dev = false, timeoutMs = PAY_TIMEOUT_MS, fetchImpl = (...args) => fetch(...args) }) {
     Object.assign(this, { manifest, endpoint, session, uiOrigin, prompts, dev, timeoutMs, fetchImpl });
+  }
+
+  /** Can this host draw the card sheet for this app? The manifest must say so and name the key the app uses. */
+  #cardSheetOk() {
+    return (this.manifest.payments?.handlers ?? []).includes("stripe-card") && !!this.manifest.payments?.merchant?.stripe_publishable_key;
+  }
+
+  /** The processor's API address for a card sheet: its fixed host, or in development a loopback one. Origin only. */
+  #apiOk(handler, value) {
+    let u;
+    try { u = new URL(value); } catch { return null; }
+    if (u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) return null;
+    if (u.protocol === "https:" && HANDLERS[handler].apiHosts.includes(u.hostname)) return u.origin;
+    return this.dev && u.protocol === "http:" && isLoopbackHost(u.hostname) ? u.origin : null;
   }
 
   /** Is this the kind of URL the handler may send the user to? */
@@ -48,8 +96,16 @@ export class PaymentBroker {
     const { handler, url, reference, summary } = reply;
     if (typeof handler !== "string" || !Object.hasOwn(HANDLERS, handler)) throw bad("unknown handler");
     if (!(this.manifest.payments?.handlers ?? []).includes(handler)) throw bad("handler is not in the manifest");
-    if (typeof url !== "string" || url.length > 2048 || !this.#checkoutUrlOk(handler, url)) throw bad("the checkout address is not one this handler may use");
-    if (typeof reference !== "string" || reference.length > 256) throw bad("bad reference");
+    const card = !!HANDLERS[handler].card;
+    if (card) {
+      if (!this.#cardSheetOk()) throw bad("the manifest does not declare a publishable key");
+      // The key the app's server names must be the one in the manifest: a server cannot redirect the card to another account.
+      if (reply.publishable_key !== this.manifest.payments.merchant.stripe_publishable_key) throw bad("the publishable key is not the manifest's");
+      if (typeof reference !== "string" || !/^pi_[A-Za-z0-9_]{1,64}$/.test(reference)) throw bad("bad reference");
+    } else {
+      if (typeof url !== "string" || url.length > 2048 || !this.#checkoutUrlOk(handler, url)) throw bad("the checkout address is not one this handler may use");
+      if (typeof reference !== "string" || reference.length > 256) throw bad("bad reference");
+    }
     if (!summary || typeof summary !== "object") throw bad("no summary");
 
     const { currency, total_minor: total, items } = summary;
@@ -67,7 +123,13 @@ export class PaymentBroker {
     }
     if (!Number.isSafeInteger(total) || total < 0) throw bad("bad total");
     if (total !== sum) throw bad("the total does not equal the sum of its lines");
-    return { handler, url, reference, summary: { currency, total_minor: total, items: clean } };
+    const out = { handler, url, reference, summary: { currency, total_minor: total, items: clean } };
+    if (card) {
+      const api = this.#apiOk(handler, reply.api);
+      if (!api) throw bad("the processor address is not one this handler may use");
+      Object.assign(out, { api, publishableKey: reply.publishable_key });
+    }
+    return out;
   }
 
   async request(orderRef) {
@@ -83,6 +145,7 @@ export class PaymentBroker {
         headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
         body: JSON.stringify({
           order_ref: orderRef,
+          ...(this.#cardSheetOk() ? { methods: ["card_sheet"] } : {}),
           return_url: `${ui}/_navigator/payment/return?state=${state}`,
           cancel_url: `${ui}/_navigator/payment/cancel?state=${state}`,
         }),
@@ -101,6 +164,15 @@ export class PaymentBroker {
 
     const checked = this.#validate(reply);
     const { app } = this.prompts;
+    if (HANDLERS[checked.handler].card) {
+      // The host draws the form. Nothing the user types goes anywhere the host did not choose: the processor's API
+      // (tokenising) and the app's own server (confirming). The component sees neither.
+      await this.prompts.ask(
+        { flow: "payment", method: "card", handlerHost: new URL(checked.api).host, summary: checked.summary, app },
+        { state, handler: checked.handler, orderRef, reference: checked.reference, api: checked.api, publishableKey: checked.publishableKey, attempts: 0, busy: false, timeoutMs: this.timeoutMs }
+      );
+      return { orderRef, handler: checked.handler };
+    }
     await this.prompts.ask(
       {
         flow: "payment",
@@ -112,6 +184,86 @@ export class PaymentBroker {
       { state, handler: checked.handler, orderRef, timeoutMs: this.timeoutMs }
     );
     return { orderRef, handler: checked.handler };
+  }
+
+  /**
+   * The user submitted the host-drawn card form for prompt `id`. Returns { ok: true } (the prompt is finished) or
+   * { ok: false, error } with a message for the sheet; the sheet stays open for another try. The card never leaves this
+   * function except to the processor's tokenising endpoint, and what comes back from there is a token.
+   */
+  async submitCard(id, input) {
+    const entry = this.prompts.get(id);
+    if (!entry || entry.prompt.flow !== "payment" || entry.prompt.method !== "card") return { ok: false, error: "That payment is no longer waiting." };
+    if (entry.busy) return { ok: false, error: "Your payment is already being processed." };
+    if (entry.attempts >= MAX_CARD_ATTEMPTS) {
+      this.prompts.settle(id, "reject", fail("cancelled"));
+      return { ok: false, error: "Too many attempts. Start again from the app." };
+    }
+    const checked = checkCard(input);
+    if (!checked.ok) return checked;
+    entry.busy = true;
+    entry.attempts++;
+    try {
+      const pm = await this.#tokenise(entry, checked.card);
+      if (!pm.ok) return pm;
+      const confirmed = await this.#confirm(entry, pm.id);
+      if (!confirmed.ok) return confirmed;
+      this.prompts.settle(id, "resolve", true);
+      return { ok: true };
+    } finally {
+      entry.busy = false;
+    }
+  }
+
+  /** Card -> payment method token, straight to the processor with the publishable key. */
+  async #tokenise(entry, card) {
+    const form = new URLSearchParams({ type: "card", "card[number]": card.number, "card[exp_month]": String(card.exp_month), "card[exp_year]": String(card.exp_year), "card[cvc]": card.cvc });
+    let res;
+    try {
+      res = await this.fetchImpl(`${entry.api}/v1/payment_methods`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Bearer ${entry.publishableKey}` },
+        body: form,
+        redirect: "error",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        signal: AbortSignal.timeout(CARD_TIMEOUT_MS),
+      });
+    } catch (e) {
+      return { ok: false, error: "Could not reach the payment processor. Nothing was charged. Please try again." };
+    }
+    const body = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, error: safeMessage(body?.error?.message, "The card could not be accepted.") };
+    if (typeof body?.id !== "string" || !/^pm_[A-Za-z0-9_]{1,64}$/.test(body.id)) return { ok: false, error: "The payment processor sent an unexpected answer. Nothing was charged." };
+    return { ok: true, id: body.id };
+  }
+
+  /** Ask the app's server to charge the order with that token. The server, not this code, decides what is paid. */
+  async #confirm(entry, paymentMethod) {
+    let res;
+    try {
+      res = await this.fetchImpl(`${this.endpoint.replace(/\/$/, "")}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
+        body: JSON.stringify({ order_ref: entry.orderRef, reference: entry.reference, payment_method: paymentMethod }),
+        redirect: "error",
+        signal: AbortSignal.timeout(CARD_TIMEOUT_MS * 2),
+      });
+    } catch {
+      return { ok: false, error: "Could not reach the app's server. Please check before trying again, in case the payment went through." };
+    }
+    const text = await res.text().catch(() => "");
+    let body;
+    try { body = text.length <= MAX_REPLY ? JSON.parse(text) : null; } catch { body = null; }
+    if (res.status === 402) return { ok: false, error: safeMessage(body?.message, "Your card was declined.") };
+    if (!res.ok) return { ok: false, error: safeMessage(body?.message, "The payment could not be completed.") };
+    if (body?.status === "requires_action") {
+      // 3-D Secure needs the processor's own page; this sheet cannot show it. Say so rather than leave the user stuck.
+      this.prompts.settle(entry.prompt.id, "reject", fail("unavailable", "the card needs extra verification, which this payment sheet cannot do yet"));
+      return { ok: false, error: "Your bank needs to verify this payment, which this sheet cannot do yet." };
+    }
+    if (body?.status !== "succeeded" && body?.status !== "processing") return { ok: false, error: "The payment did not go through." };
+    return { ok: true };
   }
 
   /**

@@ -56,10 +56,12 @@
   },
   "payments": {
     "handlers": [
-      "stripe"
+      "stripe",
+      "stripe-card"
     ],
     "merchant": {
-      "domain": "tasks.localhost"
+      "domain": "tasks.localhost",
+      "stripe_publishable_key": "pk_test_latticedev"
     },
     "server": "https://tasks.localhost/pay"
   },

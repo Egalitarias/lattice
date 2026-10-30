@@ -20,7 +20,7 @@
 //                        [--oidc <issuer>,<client_id>[,<client_secret>]]... [--dev]
 //                        [--navigator-dist <dir> | --no-navigator]
 //                        [--no-webtransport] [--wt-port n] [--wt-cert pem --wt-key pem]
-//                        [--stripe-key sk_test_...] [--stripe-webhook-secret whsec_...] [--stripe-api http://127.0.0.1:9200]
+//                        [--stripe-key sk_test_...] [--stripe-webhook-secret whsec_...] [--stripe-publishable-key pk_test_...] [--stripe-api http://127.0.0.1:9200]
 
 import http from "node:http";
 import { createHash } from "node:crypto";
@@ -116,6 +116,9 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   const blobs = new Map();
   const entry = hashOf(wasm);
   blobs.set(entry, { bytes: wasm, type: "application/wasm" });
+
+  // Where the host may call the processor with the publishable key (the card sheet): the stand-in when one is configured.
+  if (stripe) stripe = { ...stripe, processorApi: stripe.processorApi ?? (stripe.api ? `${stripe.api.protocol}://${stripe.api.host}:${stripe.api.port}` : "https://api.stripe.com") };
 
   const manifest = { ...JSON.parse(readFileSync(join(appDir, "manifest.json"), "utf8")), entry };
   if (domain) manifest.app = domain;
@@ -275,6 +278,7 @@ function args(argv) {
     else if (argv[i] === "--wt-key") out.wtKey = resolve(argv[++i]);
     else if (argv[i] === "--stripe-key") (out.stripe ??= {}).secretKey = argv[++i];
     else if (argv[i] === "--stripe-webhook-secret") (out.stripe ??= {}).webhookSecret = argv[++i];
+    else if (argv[i] === "--stripe-publishable-key") (out.stripe ??= {}).publishableKey = argv[++i];
     else if (argv[i] === "--stripe-api") {
       // Point the Stripe client at a stand-in (development). Real Stripe needs no override.
       const u = new URL(argv[++i]);

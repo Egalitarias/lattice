@@ -165,9 +165,9 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   recovery or credential management, and the only identity provider tried is the bundled development one (it is
   standards-shaped but not a real provider). Passkeys need Navigator's page served from the app's domain, so in this
   prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
-- Payments: hosted checkout only (the processor draws the card form on its own domain). The server code uses the
+- Payments: hosted checkout, or a card sheet the host draws itself (`stripe-card`; see "Honest limits" in `spec/payments.md`: processors restrict raw card handling, and 3-D Secure cards need hosted checkout). The server code uses the
   official `stripe` library but has only been run against the bundled stand-in, which mirrors Stripe's documentation.
-  There is no host-drawn card or wallet sheet, no recurring payments, refunds or receipts, and orders are in memory.
+  There is no wallet sheet, no recurring payments, refunds or receipts, and orders are in memory.
   A double payment (two checkout sessions for one order both paid) is detected and logged but not refunded.
   The server only accepts return addresses on the app's own domain, and Navigator serves its page there only for
   `*.localhost` names, so (like passkeys) payments work for `.localhost` apps in this prototype.
@@ -200,7 +200,8 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6. [x] Auth: OIDC and passkeys, host-drawn sign-in, session upgrade
 6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
-6d. [ ] A host-drawn payment sheet, experiments
+6d. [x] A host-drawn card sheet; A/B experiments (`spec/experiments.md`)
+6e. [ ] A wallet sheet (Payment Request API), 3-D Secure in the sheet
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
 7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
 7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface

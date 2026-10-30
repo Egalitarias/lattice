@@ -180,7 +180,7 @@ try {
   // Pro belongs to the account.
   await signOut();
   check(await createAccount("Quinn"), "a second account is created");
-  check(await js("!/Pro/.test(document.getElementById('app').textContent.replace(/Upgrade to Pro/g, ''))") , "the second account does not have Pro");
+  check(await js("!/\\(Pro\\)/.test(document.getElementById('app').textContent)") , "the second account does not have Pro");
   check(await until(`!![...document.querySelectorAll('#app button')].find((b) => b.textContent === ${JSON.stringify("Upgrade to Pro ($4.00)")})`), "and is offered the upgrade");
 
   if (shot) {

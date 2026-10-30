@@ -457,6 +457,18 @@ export class Controller {
         if (!this.auth.finishPasskey(body.id, body)) throw new HttpError(404, "no such sign-in request");
         return;
 
+      // The card form the host drew for a payment. The details go to the broker and nowhere else: not the component, not
+      // analytics, not the log. A failure comes back as a message for the sheet, which stays open.
+      case "prompt/card": {
+        if (!this.payments) throw new HttpError(404, "no such endpoint");
+        const fields = ["number", "exp_month", "exp_year", "cvc"];
+        if (typeof body.id !== "string" || fields.some((f) => typeof body[f] !== "string" || body[f].length > 30)) throw new HttpError(400, "bad card details");
+        this.analytics?.noteSensitive([body.number, body.cvc]);
+        const r = await this.payments.submitCard(body.id, { number: body.number, exp_month: body.exp_month, exp_year: body.exp_year, cvc: body.cvc });
+        if (!r.ok) throw new HttpError(422, r.error);
+        return;
+      }
+
       // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
       case "prompt/cancel":
       case "auth/cancel":

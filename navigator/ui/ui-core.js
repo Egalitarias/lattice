@@ -66,6 +66,9 @@ const h = (tag, attrs = {}, text) => {
   return el;
 };
 
+/** An element with children (h takes only text). */
+const kids = (el, ...children) => (el.append(...children), el);
+
 const LANDMARK = {
   banner: ["header", {}], navigation: ["nav", {}], main: ["main", {}], complementary: ["aside", {}],
   contentinfo: ["footer", {}], search: ["div", { role: "search" }], dialog: ["div", { role: "dialog", "aria-modal": "true" }],
@@ -431,7 +434,7 @@ function experimentsEl(x) {
   const box = h("input", { type: "checkbox", id: "experiments-optin" });
   box.checked = !x.optOut;
   box.addEventListener("change", () => post("experiments", { optOut: !box.checked }));
-  d.append(h("div", { class: "field" }, box, h("label", { for: "experiments-optin" }, "Take part in this app's experiments")));
+  d.append(kids(h("div", { class: "field" }), box, h("label", { for: "experiments-optin" }, "Take part in this app's experiments")));
   d.append(h("p", {}, x.optOut ? "You see the standard version of everything." : "This app compares versions of itself. You are in:"));
   const ul = h("ul", {});
   for (const e of x.list) ul.append(h("li", {}, `${e.name}: ${e.yours ?? "not yet assigned"}${e.description ? ` \u2014 ${e.description}` : ""}`));
@@ -480,6 +483,12 @@ function describe(p) {
   const who = `${p.app.name} (${p.app.domain})`;
   switch (p.flow) {
     case "payment":
+      if (p.method === "card") {
+        return {
+          title: `Pay ${money(p.summary.total_minor, p.summary.currency)} to ${p.app.name}`,
+          text: `Enter your card below. This form is drawn by Lattice Navigator and your card goes to ${p.handlerHost}; ${p.app.domain} never sees it.`,
+        };
+      }
       return {
         title: `Pay ${money(p.summary.total_minor, p.summary.currency)} to ${p.app.name}`,
         text: `${who} is asking you to pay. You will enter your payment details on ${p.handlerHost}; ${p.app.domain} never sees them.`,
@@ -512,16 +521,49 @@ function showAuth(p) {
     total.style.fontWeight = "600";
     parts.push(list, total);
   }
+  if (p.flow === "payment" && p.method === "card") return showCardSheet(p, d, parts, status, cancel);
   dialog.replaceChildren(...parts, status, h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }, ""));
   dialog.lastChild.append(cont, cancel);
   if (!dialog.open) dialog.showModal();
   cont.focus();
 }
 
+/** The card form, drawn by the host. The fields are the browser's standard card fields so that autofill works. */
+function showCardSheet(p, d, parts, status, cancel) {
+  const field = (id, label, attrs) => {
+    const input = h("input", { id, name: id, required: true, spellcheck: "false", autocapitalize: "off", ...attrs });
+    return { input, el: kids(h("div", { class: "field" }), h("label", { for: id }, label), input) };
+  };
+  const number = field("card-number", "Card number", { type: "text", inputmode: "numeric", autocomplete: "cc-number", maxlength: "23", placeholder: "1234 1234 1234 1234" });
+  const month = field("card-month", "Expiry month (MM)", { type: "text", inputmode: "numeric", autocomplete: "cc-exp-month", maxlength: "2", placeholder: "MM" });
+  const year = field("card-year", "Expiry year (YY)", { type: "text", inputmode: "numeric", autocomplete: "cc-exp-year", maxlength: "4", placeholder: "YY" });
+  const cvc = field("card-cvc", "Security code", { type: "password", inputmode: "numeric", autocomplete: "cc-csc", maxlength: "4" });
+  const pay = h("button", { type: "submit", "data-emphasis": "primary" }, `Pay ${money(p.summary.total_minor, p.summary.currency)}`);
+  const form = h("form", { class: "stack", "data-axis": "vertical", "data-gap": "sm", novalidate: true });
+  const row = h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" });
+  row.append(month.el, year.el, cvc.el);
+  form.append(number.el, row, status, kids(h("div", { class: "stack", "data-axis": "horizontal", "data-gap": "sm" }), pay, cancel));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    pay.disabled = true;
+    status.textContent = "Paying…";
+    const r = await transport.post("prompt/card", { id: p.id, number: number.input.value, exp_month: month.input.value, exp_year: year.input.value, cvc: cvc.input.value });
+    if (r.ok) return; // the dialog closes when the host reports the prompt finished
+    status.textContent = r.error ?? "The payment did not go through.";
+    cvc.input.value = "";
+    pay.disabled = false;
+    number.input.focus();
+  });
+  dialog.replaceChildren(...parts, form);
+  if (!dialog.open) dialog.showModal();
+  number.input.focus();
+}
+
 function closeAuth(id) {
   if (activePrompt && activePrompt.id === id) {
     activePrompt = null;
     if (dialog.open) dialog.close();
+    dialog.replaceChildren(); // nothing the user typed (a card number) outlives the dialog
   }
 }
 

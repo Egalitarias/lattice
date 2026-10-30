@@ -9,8 +9,9 @@ Two rules that the web does not enforce:
    that the user *finished*, not that they *paid*. Only the origin's server, acting on a verified message from the
    payment processor, decides that.
 
-This version specifies the **hosted checkout** handler (the processor draws the card form on its own domain). A
-host-drawn card or wallet sheet is a separate handler, not yet specified.
+This version specifies two handlers: **hosted checkout** (`stripe`; the processor draws the card form on its own domain)
+and a **card sheet** (`stripe-card`; the host draws the form, see "Card sheet" below). A wallet sheet (Apple Pay,
+Google Pay, the browser's Payment Request API) is not yet specified.
 
 ## Parties
 
@@ -100,6 +101,67 @@ which order to ask about.
 Like OIDC's `state`: 256 random bits per request, single use, expiring after 10 minutes, and the only thing that binds a
 return to a pending request. A forged, repeated or replayed return is refused without disturbing any pending request,
 as is a request that repeats a parameter.
+
+## Card sheet (`stripe-card`)
+
+The user stays in Navigator's own dialog. The host draws the card form, sends the card straight to the processor to be
+turned into a token, and asks the app's server to charge the order with that token. The app component never sees the
+card, a token, or any of this.
+
+```
+Host ── POST {payments.server}/sessions  { order_ref, return_url, cancel_url, "methods": ["card_sheet"] } ──► Server
+Server: as before, then creates a PaymentIntent for the order's real amount (metadata.order_id = the order)
+        reply:  { "handler": "stripe-card", "reference": "pi_...", "publishable_key": "pk_...", "api": "https://api.stripe.com",
+                  "summary": { ... } }
+Host: validates (below), draws "Pay $4.00 to <app>?" and a card form (number, expiry, security code)
+User submits ──► Host checks the form locally (length, Luhn, expiry), then
+Host ── POST {api}/v1/payment_methods  (Bearer publishable key; the card) ──────────────────────────► Processor ──► pm_...
+Host ── POST {payments.server}/confirm  { order_ref, reference, payment_method } ──────────────────► Server
+Server: owner and intent must match the order (404 otherwise); confirms the intent with its secret key
+        reply: 200 { "status": "succeeded" | "processing" | "requires_action" }   or   402 { code, message } for a declined card
+Processor ──► Server: signed webhook  payment_intent.succeeded   (the only thing that marks the order paid)
+```
+
+The host sends `methods: ["card_sheet"]` only if the manifest lists `stripe-card` under `payments.handlers` **and** declares
+`payments.merchant.stripe_publishable_key`. A server that does not offer the sheet ignores `methods` and answers with a
+hosted checkout, which the host handles as before.
+
+### What the host checks in the reply
+
+- `publishable_key` **equals the key in the manifest**. The server cannot send the user's card to another merchant's account.
+- `api` is the processor's address and nothing else (no path, query or credentials): `https://api.stripe.com`, or in
+  development only, `http` on loopback.
+- `reference` looks like a PaymentIntent id (`pi_...`), and the summary passes the same checks as for hosted checkout.
+
+### Where the card goes
+
+Typed into the host's dialog, held in memory for one request, sent over TLS to the processor's tokenising endpoint, and
+discarded. It is not given to the component, the app's server, analytics (the host remembers the number and code for
+ten minutes to redact them from any error text), or logs, and the dialog is emptied when it closes. In the Node
+Navigator it crosses the local loopback connection between the Navigator's window and the Navigator process, which is
+protected like every other request there (a custom header and an `Origin` check). Messages from the processor that are
+shown to the user are shortened and have long digit runs replaced.
+
+Up to five attempts are allowed per sheet; a declined card keeps the sheet open for another card. A card that needs
+extra verification (3-D Secure) ends the payment with an explanation: the sheet cannot show the bank's page yet, so
+such cards need the hosted handler.
+
+### Server duties
+
+On `/confirm`: require a signed-in user (`401`), the order owned by that user and unpaid (`404` / `409`), and an intent
+that the server itself created for **that order** (`404` otherwise). Confirm with the secret key. Treat the `status` in the
+reply as a hint only. On the webhook `payment_intent.succeeded`: verify the signature, find the order through the intent's
+metadata, require that the intent is one the server made for the order, that `amount` and `amount_received` equal the
+order's total and the currency matches, and that the status is `succeeded`; then fulfil once. `payment_intent.payment_failed`
+never undoes a payment.
+
+### Honest limits
+
+Handling raw card numbers in a client is something most processors restrict: Stripe, for example, requires approval before
+an account may send card numbers to its API directly, and prefers Elements or the Payment Request API for that reason. This
+handler is a working design against a stand-in that mirrors the documented shapes; it has not been run against a live
+processor. Using it in production means the *host* (Navigator) is in scope for the processor's card-data rules, which is
+a decision for whoever ships a Navigator, not for an app.
 
 ## Webhooks and fulfilment (server)
 
