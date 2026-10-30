@@ -3,7 +3,7 @@
 //
 // Each pending interaction is single-use and expires. Nothing outside the host can create one.
 
-import { randomUUID } from "node:crypto";
+import { uuid } from "./bytes.mjs";
 
 /** A failure the app may see: carries a WIT `host-error` value. */
 export class HostFailure extends Error {
@@ -29,7 +29,7 @@ export class Prompts {
 
   /** Show `prompt` to the user and wait. `extra` is private to the host (never sent to a window). */
   ask(prompt, extra = {}) {
-    const id = randomUUID();
+    const id = uuid();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.settle(id, "reject", fail("cancelled")), extra.timeoutMs ?? this.timeoutMs);
       const full = { id, app: this.app, ...prompt };

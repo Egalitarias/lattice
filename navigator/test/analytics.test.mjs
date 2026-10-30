@@ -11,6 +11,7 @@ import { Session, HttpError } from "../navigator.mjs";
 import { HostCrash, ComponentError } from "../apphost.mjs";
 import { createCollector, checkBatch } from "../../server/analytics.mjs";
 import { withStack, find, sleep, quiet } from "./stack.mjs";
+import { FileKv } from "../kv-node.mjs";
 
 const stack = (fn, opts = {}) => withStack(fn, opts);
 
@@ -39,7 +40,7 @@ function mk({ level = "full", processors = ALL, dev = false, status = 204, now, 
     return new Response(null, { status: st });
   };
   const manifest = { app: "tasks.localhost", version: "1.2.3", entry: "sha256-" + "A".repeat(43), analytics: { events: CATALOG } };
-  const a = new Analytics({ manifest, processors, dataDir: dir, dev, log: (l, m) => logs.push([l, m]), fetchImpl, now: now ?? (() => clock), flushMs, backoffMs });
+  const a = new Analytics({ manifest, processors, kv: new FileKv(dir), dev, log: (l, m) => logs.push([l, m]), fetchImpl, now: now ?? (() => clock), flushMs, backoffMs });
   a.setLevel(level);
   return { a, calls, logs, dir, behaviour, tick: (ms) => { clock += ms; }, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -82,7 +83,7 @@ test("levels: timestamps are coarse unless the user chose full", async () => {
 
 test("levels: the default is errors only, and the choice persists across restarts", () => {
   const dir = mkdtempSync(join(tmpdir(), "nav-an-lv-"));
-  const make = () => new Analytics({ manifest: { app: "x.example", analytics: { events: [] } }, processors: ALL, dataDir: dir, fetchImpl: async () => new Response(null, { status: 204 }) });
+  const make = () => new Analytics({ manifest: { app: "x.example", analytics: { events: [] } }, processors: ALL, kv: new FileKv(dir), fetchImpl: async () => new Response(null, { status: 204 }) });
   try {
     assert.equal(DEFAULT_LEVEL, "errors");
     const a = make();
@@ -93,9 +94,9 @@ test("levels: the default is errors only, and the choice persists across restart
     assert.throws(() => a.setLevel(undefined), RangeError);
     assert.throws(() => a.setLevel({}), RangeError);
     assert.equal(a.level, "anonymous", "a refused change changes nothing");
-    assert.equal(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).analytics, "anonymous");
+    assert.equal(JSON.parse(new FileKv(dir).get("settings")).analytics, "anonymous");
     // Settings written by something else do not break it.
-    rmSync(join(dir, "settings.json"));
+    new FileKv(dir).delete("settings");
     assert.equal(make().level, "errors");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -397,7 +398,7 @@ test("client id: random, stable until reset, and never sent below full", async (
   const id = h.a.clientId();
   assert.match(id, /^c_[A-Za-z0-9_-]{22}$/);
   assert.equal(h.a.clientId(), id);
-  const again = new Analytics({ manifest: { app: "tasks.localhost", analytics: { events: [] } }, processors: ALL, dataDir: h.dir });
+  const again = new Analytics({ manifest: { app: "tasks.localhost", analytics: { events: [] } }, processors: ALL, kv: new FileKv(h.dir) });
   assert.equal(again.clientId(), id, "persists across restarts");
   const fresh = h.a.resetClient();
   assert.notEqual(fresh, id);

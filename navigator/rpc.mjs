@@ -3,12 +3,10 @@
 //
 // The component only ever sees one of: validated response bytes, or a classified error.
 
-import { randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
+import { Schema } from "../shared/schema.mjs";
 import { encode, decode } from "../shared/cbor.mjs";
+import { b64uDecode, fromUtf8, randomToken, uuid, concat } from "./bytes.mjs";
+import { getJson, setJson } from "./kv.mjs";
 
 export const RPC_TYPE = "application/vnd.lattice.rpc+cbor";
 export const RPC_ERROR_TYPE = "application/vnd.lattice.rpc-error+cbor";
@@ -32,7 +30,7 @@ export function parseSetSession(value, nowSec = Math.floor(Date.now() / 1000)) {
   if (typeof value !== "string" || value.length > 2048) return null;
   let s;
   try {
-    s = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    s = JSON.parse(fromUtf8(b64uDecode(value)));
   } catch {
     return null;
   }
@@ -49,22 +47,18 @@ export function parseSetSession(value, nowSec = Math.floor(Date.now() / 1000)) {
  * signed the user in. Apps never see the token. Persisted per origin.
  */
 export class SessionStore {
-  constructor(dir, origin, { now = () => Date.now() } = {}) {
-    this.file = join(dir, "sessions", origin.replace(/[^A-Za-z0-9.-]/g, "_") + ".json");
+  constructor(kv, origin, { now = () => Date.now() } = {}) {
+    this.kv = kv;
+    this.key = `session/${origin}`;
     this.now = now;
   }
   #read() {
-    if (existsSync(this.file)) {
-      try {
-        const s = JSON.parse(readFileSync(this.file, "utf8"));
-        if (typeof s.token === "string" && TOKEN_RE.test(s.token)) return s;
-      } catch { /* fall through to a fresh anonymous session */ }
-    }
-    return this.rotate();
+    const s = getJson(this.kv, this.key);
+    if (s && typeof s.token === "string" && TOKEN_RE.test(s.token)) return s;
+    return this.rotate(); // none, or unreadable: a fresh anonymous session
   }
   #write(s) {
-    mkdirSync(join(this.file, ".."), { recursive: true });
-    writeFileSync(this.file, JSON.stringify(s), { mode: 0o600 });
+    setJson(this.kv, this.key, s);
     return s;
   }
   /** The token to send. An expired signed-in session is replaced by a fresh anonymous one. */
@@ -86,7 +80,7 @@ export class SessionStore {
   }
   /** Replace the session with a fresh anonymous one. */
   rotate() {
-    return this.#write({ token: randomBytes(32).toString("base64url") });
+    return this.#write({ token: randomToken(32) });
   }
 }
 
@@ -124,16 +118,14 @@ export class RpcClient {
     this.session = session;
     this.timeoutMs = timeoutMs;
 
-    const ajv = new Ajv2020({ strict: false, allErrors: true });
-    addFormats(ajv);
-    this.ajv = ajv;
+    // Throws SchemaError for any keyword the interpreter would not enforce: such an API is refused, not half-checked.
     this.methods = new Map(
       Object.entries(description.methods).map(([name, m]) => [
         name,
         {
           effect: m.effect ?? "write",
-          validateRequest: ajv.compile(m.request),
-          validateResponse: ajv.compile(m.response),
+          request: new Schema(m.request),
+          response: new Schema(m.response),
           declared: new Set((m.errors ?? []).map((e) => e.code)),
         },
       ])
@@ -150,9 +142,8 @@ export class RpcClient {
     } catch (e) {
       return host("invalid-argument", `request is not valid CBOR: ${e.message}`);
     }
-    if (!m.validateRequest(request)) {
-      return host("invalid-argument", `request to ${method} does not match the API description: ${this.ajv.errorsText(m.validateRequest.errors, { separator: "; " })}`);
-    }
+    const requestProblem = m.request.check(request);
+    if (requestProblem) return host("invalid-argument", `request to ${method} does not match the API description: ${requestProblem}`);
     const body = encode(request);
     if (body.length > MAX_BODY) return host("invalid-argument", "request too large");
 
@@ -172,7 +163,7 @@ export class RpcClient {
       "Content-Type": RPC_TYPE,
       Accept: `${RPC_TYPE}, ${RPC_ERROR_TYPE}`,
       "Lattice-Api": this.apiHash,
-      "Lattice-Request-Id": randomUUID(),
+      "Lattice-Request-Id": uuid(),
     };
     if (this.session) headers["Lattice-Session"] = this.session.token();
 
@@ -206,9 +197,8 @@ export class RpcClient {
       } catch (e) {
         return transport(`response is not valid CBOR: ${e.message}`);
       }
-      if (!m.validateResponse(value)) {
-        return transport(`response violates the API description for ${method}: ${this.ajv.errorsText(m.validateResponse.errors, { separator: "; " })}`);
-      }
+      const responseProblem = m.response.check(value);
+      if (responseProblem) return transport(`response violates the API description for ${method}: ${responseProblem}`);
       applySessionHeaders(this.session, res.headers); // only after the response passed validation
       return ok(bytes);
     }
@@ -241,5 +231,5 @@ async function readCapped(res, max) {
     if (size > max) throw new Error("response too large");
     chunks.push(c);
   }
-  return new Uint8Array(Buffer.concat(chunks));
+  return concat(chunks);
 }

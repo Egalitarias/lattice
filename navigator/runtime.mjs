@@ -4,29 +4,15 @@
 //   2. Validate it against the manifest schema and check it belongs to this origin.
 //   3. Fetch the entry component (and the API description, if any) by content hash and verify
 //      each hash before using a byte of it.
-//   4. Transpile the component (jco), cached by hash. Instantiation happens in the worker.
+//   4. Turning the component into runnable code is the environment's job (runtime-node.mjs, or the browser's
+//      own transpile step): this file only decides what may be trusted, and does so identically everywhere.
 
-import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { transpile } from "@bytecodealliance/jco";
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
 import { decode } from "../shared/cbor.mjs";
+import { hashOf, fromUtf8 } from "./bytes.mjs";
+import { checkManifest, checkApiDescription } from "./validators.mjs";
 
 export const MANIFEST_TYPE = "application/vnd.lattice.app+cbor";
-const here = dirname(fileURLToPath(import.meta.url));
-
-const ajv = new Ajv2020({ strict: false, allErrors: true });
-addFormats(ajv);
-const loadSchema = (name) => ajv.compile(JSON.parse(readFileSync(join(here, "..", "spec", name), "utf8")));
-const validateManifest = loadSchema("manifest.schema.json");
-const validateApi = loadSchema("api.schema.json");
-
 export class LoadError extends Error {}
-
-export const hashOf = (bytes) => "sha256-" + createHash("sha256").update(bytes).digest("base64url");
 
 const isLoopback = (h) => h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h.endsWith(".localhost");
 
@@ -51,9 +37,8 @@ export async function fetchApp(url, { dev = false } = {}) {
   } catch (e) {
     throw new LoadError(`manifest is not valid CBOR: ${e.message}`);
   }
-  if (!validateManifest(manifest)) {
-    throw new LoadError("manifest does not match the schema:\n  " + ajv.errorsText(validateManifest.errors, { separator: "\n  " }));
-  }
+  const manifestProblem = checkManifest(manifest);
+  if (manifestProblem) throw new LoadError("manifest does not match the schema:\n  " + manifestProblem);
   if (manifest.app !== u.hostname) {
     if (!dev) throw new LoadError(`manifest is for ${manifest.app} but was served from ${u.hostname}`);
     console.warn(`navigator: --dev: accepting manifest for ${manifest.app} served from ${u.host}`);
@@ -69,14 +54,13 @@ export async function fetchApp(url, { dev = false } = {}) {
     }
     let description;
     try {
-      description = JSON.parse(Buffer.from(await fetchBlob(u, manifest.api.schema)).toString("utf8"));
+      description = JSON.parse(fromUtf8(await fetchBlob(u, manifest.api.schema)));
     } catch (e) {
       if (e instanceof LoadError) throw e;
       throw new LoadError(`API description is not valid JSON: ${e.message}`);
     }
-    if (!validateApi(description)) {
-      throw new LoadError("API description does not match the schema:\n  " + ajv.errorsText(validateApi.errors, { separator: "\n  " }));
-    }
+    const apiProblem = checkApiDescription(description);
+    if (apiProblem) throw new LoadError("API description does not match the schema:\n  " + apiProblem);
     // The declared URL names the app's origin; we reach it at the address we fetched the manifest from.
     api = { description, hash: manifest.api.schema, endpoint: new URL(declared.pathname, u.origin).href };
   }
@@ -111,38 +95,13 @@ export async function fetchApp(url, { dev = false } = {}) {
   return { url: u, manifest, wasm, api, tokenEndpoint, paymentsEndpoint, analyticsProcessors };
 }
 
-async function fetchBlob(origin, hash) {
+export async function fetchBlob(origin, hash) {
   const res = await fetch(new URL(`/.lattice/blob/${hash}`, origin), { redirect: "error" });
   if (!res.ok) throw new LoadError(`could not fetch ${hash}: HTTP ${res.status}`);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const actual = hashOf(bytes);
+  const actual = await hashOf(bytes);
   if (actual !== hash) {
     throw new LoadError(`hash mismatch: manifest says ${hash}, server sent ${actual}`);
   }
   return bytes;
-}
-
-/**
- * Transpile to JS + core wasm (cached by hash) and return the entry module path.
- * The cache is content-addressed and written atomically, so concurrent processes can share it.
- */
-export async function prepareComponent({ manifest, wasm, cacheDir }) {
-  const outDir = join(cacheDir, manifest.entry.replace("sha256-", ""));
-  const entryJs = join(outDir, "app.js");
-  if (existsSync(entryJs)) return entryJs;
-
-  const { files } = await transpile(wasm, { name: "app", instantiation: "async", noTypescript: true });
-  const tmp = `${outDir}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-  for (const [name, data] of Object.entries(files)) {
-    const p = join(tmp, name);
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, data);
-  }
-  try {
-    renameSync(tmp, outDir); // all-or-nothing
-  } catch {
-    rmSync(tmp, { recursive: true, force: true }); // another process got there first
-  }
-  if (!existsSync(entryJs)) throw new LoadError("could not prepare the component");
-  return entryJs;
 }

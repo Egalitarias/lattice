@@ -1,249 +1,32 @@
-// Lattice Navigator: prototype Lattice host.
+// Lattice Navigator for Node.
 //
 //   node navigator.mjs <url> [--dev] [--port 7070] [--data .navigator]
 //
-// Lattice Navigator discovers and verifies the app at <url>, runs its WASM component, and serves a local,
-// semantic UI projection of the scene tree. The app's code never runs in the browser: the page is
-// a renderer that receives a validated tree and sends back only {node, event, values}.
+// Discovers and verifies the app at <url>, runs its WASM component, and serves a local, semantic UI projection of
+// its scene tree to a browser on this machine. The logic is in controller.mjs, shared with the browser build; this file
+// is the Node environment around it: a profile on disk, worker threads, and an HTTP server with the checks a local server
+// needs. The app's code never runs in the browser: the page is a renderer that receives a validated tree and sends back
+// only {node, event, values}.
 
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchApp, prepareComponent, LoadError } from "./runtime.mjs";
-import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
-import { RpcClient, SessionStore } from "./rpc.mjs";
-import { AuthBroker } from "./auth.mjs";
-import { PaymentBroker } from "./payments.mjs";
-import { Analytics } from "./analytics.mjs";
-import { Prompts } from "./prompts.mjs";
-import { CAPABILITY_IMPORTS } from "./host.mjs";
-import { SceneStore, SceneError, toArgs, argsObject } from "./scene.mjs";
+import { fetchApp, LoadError } from "./runtime.mjs";
+import { prepareComponent } from "./runtime-node.mjs";
+import { Controller, HttpError, Session } from "./controller.mjs";
+import { FileKv } from "./kv-node.mjs";
+import { nodeSpawn } from "./spawn-node.mjs";
+
+export { Session, HttpError };
 
 const here = dirname(fileURLToPath(import.meta.url));
-
-// ---- Routing ----------------------------------------------------------------------------------
-
-function compileRoutes(routes) {
-  return Object.entries(routes)
-    .map(([pattern, handler]) => {
-      const names = [];
-      const re = pattern
-        .split("/")
-        .map((seg) => {
-          const m = seg.match(/^\{([a-z][A-Za-z0-9_]*)(\*?)\}$/);
-          if (!m) return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          names.push(m[1]);
-          return m[2] ? "(.*)" : "([^/]+)";
-        })
-        .join("/");
-      return { handler, names, re: new RegExp(`^${re}$`), literal: names.length === 0 };
-    })
-    .sort((a, b) => Number(b.literal) - Number(a.literal));
-}
-
-function matchRoute(compiled, pathname) {
-  for (const r of compiled) {
-    const m = r.re.exec(pathname);
-    if (m) {
-      const params = {};
-      r.names.forEach((n, i) => (params[n] = decodeURIComponent(m[i + 1])));
-      return { handler: r.handler, params };
-    }
-  }
-  return null;
-}
-
-// ---- Errors from the component ----------------------------------------------------------------
-
-/** jco throws ComponentError with the WIT error in .payload. */
-function appFailure(e) {
-  const p = e?.payload;
-  if (p && typeof p === "object" && typeof p.tag === "string") {
-    switch (p.tag) {
-      case "invalid": return { status: 422, message: p.val };
-      case "not-found": return { status: 404, message: "That page does not exist." };
-      case "unauthorized": return { status: 401, message: "Please sign in to continue." };
-      case "forbidden": return { status: 403, message: "You are not allowed to do that." };
-      default: return { status: 500, message: "The app hit an error.", detail: p.val };
-    }
-  }
-  return null;
-}
-
-export class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
-
-// ---- The session ------------------------------------------------------------------------------
-
-export class Session {
-  store = new SceneStore();
-  path = "/";
-  #chain = Promise.resolve();
-  constructor(host, manifest, origin, log, analytics = null) {
-    this.analytics = analytics;
-    this.host = host;
-    this.manifest = manifest;
-    this.routes = compileRoutes(manifest.routes);
-    this.origin = origin;
-    this.log = log;
-  }
-
-  /** Calls into the component are serialised, as the contract requires. */
-  serial(fn) {
-    const run = this.#chain.then(fn, fn);
-    this.#chain = run.catch(() => {});
-    return run;
-  }
-
-  /** Run a call into the component, translating its failures into HttpErrors. */
-  async #call(fn) {
-    try {
-      return await fn();
-    } catch (e) {
-      if (e instanceof HttpError) throw e;
-      if (e instanceof HostCrash) {
-        this.log("error", `component stopped: ${e.message}`);
-        this.analytics?.host("error", "host.crash", { detail: e.message });
-        await this.#recover();
-        throw new HttpError(504, "The app stopped responding and was restarted.");
-      }
-      const f = appFailure(e);
-      if (!f) throw e;
-      if (f.detail) {
-        this.log("error", `app error: ${f.detail}`);
-        this.analytics?.host("error", "app.internal", { detail: f.detail });
-      }
-      throw new HttpError(f.status, f.message);
-    }
-  }
-
-  /** The worker was killed or died: start a fresh instance and show the current page again. */
-  async #recover() {
-    try {
-      await this.host.restart();
-      await this.#init();
-      await this.#route(this.path);
-    } catch (e) {
-      this.log("error", `could not restart the app: ${e.message}`);
-    }
-  }
-
-  #init() {
-    return this.host.call("init", {
-      origin: this.origin,
-      locale: "en-US",
-      colorScheme: "light",
-      reducedMotion: false,
-      textScale: 1,
-      online: true,
-      granted: [...(this.manifest.capabilities?.requires ?? []), ...(this.manifest.capabilities?.optional ?? [])],
-      oidcIssuers: (this.manifest.auth?.providers ?? []).filter((p) => p.type === "oidc").map((p) => p.issuer),
-    });
-  }
-
-  async #route(rawPath) {
-    const u = new URL(rawPath, "http://x");
-    const m = matchRoute(this.routes, u.pathname);
-    if (!m) throw new HttpError(404, "That page does not exist.");
-    const t0 = performance.now();
-    const scene = await this.host.call("route", {
-      handler: m.handler,
-      path: u.pathname,
-      params: toArgs(m.params),
-      query: toArgs(Object.fromEntries(u.searchParams)),
-    });
-    try {
-      this.store.load(scene);
-    } catch (e) {
-      if (e instanceof SceneError) {
-        this.analytics?.host("error", "host.invalid_scene", { detail: e.message });
-        throw new HttpError(500, `The app returned an invalid scene: ${e.message}`);
-      }
-      throw e;
-    }
-    this.analytics?.host("performance", "host.route", { handler: m.handler, ms: performance.now() - t0 });
-    this.path = u.pathname;
-  }
-
-  init() {
-    return this.serial(() => this.#call(() => this.#init()));
-  }
-
-  route(rawPath) {
-    return this.serial(() => this.#call(() => this.#route(rawPath)));
-  }
-
-  act(source, event, values) {
-    return this.serial(() =>
-      this.#call(async () => {
-        const field = { press: "onPress", submit: "onSubmit", change: "onChange" }[event];
-        if (!field) throw new HttpError(400, "unknown event");
-        const ref = this.store.actionRef(source, field);
-        if (!ref) throw new HttpError(400, "that control has no such action");
-
-        // Only the node's own fields, or fields of its form, may be submitted.
-        const allowed = this.store.formFields(source);
-        const own = this.store.get(source)?.body.val?.name;
-        if (own) allowed.add(own);
-        for (const k of Object.keys(values)) {
-          if (!allowed.has(k)) throw new HttpError(400, `unexpected field ${k}`);
-        }
-
-        // Remember what the user typed into sensitive fields, so it can be scrubbed from anything sent.
-        const sensitive = this.store.sensitiveFields(source);
-        this.analytics?.noteSensitive(Object.entries(values).filter(([k]) => sensitive.has(k)).map(([, v]) => v));
-
-        const t0 = performance.now();
-        const update = await this.host.call("dispatch", {
-          action: ref.action,
-          args: ref.args,
-          source,
-          values: toArgs(values),
-          input: undefined,
-        });
-        try {
-          this.store.apply(update);
-        } catch (e) {
-          if (e instanceof SceneError) {
-            this.analytics?.host("error", "host.invalid_scene", { detail: e.message });
-            throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
-          }
-          throw e;
-        }
-        this.analytics?.host("performance", "host.action", { action: ref.action, ms: performance.now() - t0 });
-        return { focus: update.focus };
-      })
-    );
-  }
-
-  /** Deliver a host-initiated event (not a reply to an app call) and apply the app's update. */
-  event(event) {
-    return this.serial(() =>
-      this.#call(async () => {
-        const update = await this.host.call("onEvent", event);
-        try {
-          this.store.apply(update);
-        } catch (e) {
-          if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
-          throw e;
-        }
-        return { focus: update.focus };
-      })
-    );
-  }
-
-  snapshot(focus) {
-    const s = this.store;
-    return { kind: "scene", path: this.path, title: s.title, lang: s.lang, live: s.live, focus, tree: s.tree() };
-  }
-}
 
 // ---- HTTP -------------------------------------------------------------------------------------
 
 const STATIC = {
-  "/_navigator/ui.js": ["ui/ui.js", "text/javascript; charset=utf-8"],
+  "/_navigator/ui.js": ["ui/ui-http.js", "text/javascript; charset=utf-8"],
+  "/_navigator/ui-core.js": ["ui/ui-core.js", "text/javascript; charset=utf-8"],
   "/_navigator/ui.css": ["ui/ui.css", "text/css; charset=utf-8"],
 };
 const SHELL_CSP = [
@@ -278,82 +61,27 @@ const CALLBACK_PAGE = (message) =>
   `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lattice Navigator</title><body><main><h1>Lattice Navigator</h1><p>${message}</p></main>`;
 
 export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {} }) {
-  const { url: appUrl, manifest, wasm, api, tokenEndpoint, paymentsEndpoint, analyticsProcessors } = await fetchApp(url, { dev });
-  const domain = manifest.app;
-  const entryJs = await prepareComponent({ manifest, wasm, cacheDir });
-
-  const granted = new Set([...(manifest.capabilities?.requires ?? []), ...(manifest.capabilities?.optional ?? [])]);
-  const wantsAuth = ["session", "auth.oidc", "auth.passkey", "payments.request"].some((c) => granted.has(c));
-
-  // Browser windows connected to this Navigator.
-  const clients = new Set();
-  const send = (res, msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
-  const broadcast = (msg) => clients.forEach((c) => send(c, msg));
+  const { url: appUrl, wasm, ...app } = await fetchApp(url, { dev });
+  const entryJs = await prepareComponent({ manifest: app.manifest, wasm, cacheDir });
+  const domain = app.manifest.app;
 
   // The page the user is looking at is served from the app's own domain when that is a *.localhost
-  // name, so a browser accepts it as the relying party for passkeys. Otherwise from 127.0.0.1.
+  // name, so a browser accepts it as the relying party for passkeys. Otherwise from 127.0.0.1. (The browser build,
+  // which is served by the app's origin itself, has no such restriction.)
   const uiHost = domain.endsWith(".localhost") ? domain : "127.0.0.1";
   let boundPort;
   const uiOrigin = () => `http://${uiHost}:${boundPort}`;
 
-  const sessionStore = wantsAuth ? new SessionStore(dataDir, domain) : null;
-  // Everything the user is asked (sign-in, payment) goes through one prompt manager.
-  const prompts = new Prompts({ broadcast, app: { name: manifest.name ?? domain, domain }, timeoutMs: authTimeoutMs });
-  const auth = sessionStore ? new AuthBroker({ manifest, tokenEndpoint, session: sessionStore, uiOrigin, prompts, dev }) : null;
-  const payments = sessionStore && manifest.payments
-    ? new PaymentBroker({ manifest, endpoint: paymentsEndpoint, session: sessionStore, uiOrigin, prompts, dev, timeoutMs: authTimeoutMs })
-    : null;
-  const rpc = api
-    ? new RpcClient({
-        endpoint: api.endpoint,
-        description: api.description,
-        apiHash: api.hash,
-        session: granted.has("session") ? sessionStore : null,
-        timeoutMs: rpcTimeoutMs,
-      })
-    : null;
+  const controller = new Controller({
+    app, kv: new FileKv(join(dataDir, "kv")), spawn: nodeSpawn, component: { entryJs }, uiOrigin,
+    dev, log, watchdogMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions,
+  });
+  await controller.start(appUrl.pathname || "/");
 
-  // Analytics policy lives in the manifest; the user's level lives in this profile. Without declared
-  // processors there is nothing to configure and nothing is ever sent.
-  const analytics = analyticsProcessors ? new Analytics({ manifest, processors: analyticsProcessors, dataDir, dev, log, ...analyticsOptions }) : null;
-
-  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, payments, analytics, onLog: log, watchdogMs });
-  try {
-    await host.start();
-  } catch (e) {
-    if (e instanceof LinkFailure) {
-      throw new LoadError(
-        `component could not be linked: ${e.message}. It likely imports a capability that the manifest does not request ` +
-          `or that this Lattice Navigator does not implement. Implemented imports: ${Object.keys(CAPABILITY_IMPORTS).join(", ")}`
-      );
-    }
-    throw e;
-  }
-  const session = new Session(host, manifest, domain, log, analytics);
-  await session.init();
-
-  const startPath = appUrl.pathname || "/";
-  let lastError = null;
-  try {
-    await session.route(startPath);
-  } catch (e) {
-    if (!(e instanceof HttpError)) throw e;
-    lastError = e.message;
-    if (startPath !== "/") await session.route("/").then(() => (lastError = null)).catch(() => {});
-  }
-
-  /** What the host itself draws around the app: who the page belongs to and who is signed in. */
-  const chrome = () => {
-    const i = sessionStore?.info();
-    return {
-      app: { name: manifest.name ?? domain, domain },
-      session: i ? { signedIn: i.signedIn, name: i.name ?? null } : null,
-      prompts: prompts.list(),
-      privacy: analytics ? analytics.snapshot() : null,
-    };
-  };
-  const snap = (focus) => ({ ...session.snapshot(focus), chrome: chrome() });
-  const current = (focus) => (lastError && !session.store.root ? { kind: "error", message: lastError, chrome: chrome() } : snap(focus));
+  // Browser windows connected to this Navigator.
+  const clients = new Set();
+  const send = (res, msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
+  controller.subscribe((msg) => clients.forEach((c) => send(c, msg)));
 
   const ok = (res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -379,26 +107,23 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
         res.writeHead(200, { "Content-Type": "text/event-stream", Connection: "keep-alive" });
         clients.add(res);
         req.on("close", () => clients.delete(res));
-        return void send(res, current());
+        return void send(res, controller.current());
       }
 
       if (req.method === "GET" && u.pathname === "/_navigator/state") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        return void res.end(JSON.stringify(current()));
+        return void res.end(JSON.stringify(controller.current()));
       }
 
-      // The identity provider sends the user's browser back here. There is no X-Navigator header on a
-      // redirect; the single-use `state` value is what binds this request to one pending sign-in.
-      if (req.method === "GET" && u.pathname === "/_navigator/auth/callback" && auth) {
-        const r = auth.callback(u.searchParams);
-        res.writeHead(r.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
-        return void res.end(CALLBACK_PAGE(r.message));
-      }
-
-      // The payment processor sends the user's browser back here (success_url / cancel_url, which the host
-      // itself chose). As with sign-in, only the single-use `state` binds it to a pending request.
-      if (req.method === "GET" && (u.pathname === "/_navigator/payment/return" || u.pathname === "/_navigator/payment/cancel") && payments) {
-        const r = payments.callback(u.pathname.endsWith("/return") ? "return" : "cancel", u.searchParams);
+      // The identity provider / payment processor sends the user's browser back here. There is no X-Navigator header on
+      // a redirect; the single-use `state` value is what binds the request to one pending interaction.
+      const callback =
+        req.method === "GET" && u.pathname === "/_navigator/auth/callback" ? () => controller.authCallback(u.searchParams)
+        : req.method === "GET" && u.pathname === "/_navigator/payment/return" ? () => controller.paymentCallback("return", u.searchParams)
+        : req.method === "GET" && u.pathname === "/_navigator/payment/cancel" ? () => controller.paymentCallback("cancel", u.searchParams)
+        : null;
+      if (callback) {
+        const r = callback();
         res.writeHead(r.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
         return void res.end(CALLBACK_PAGE(r.message));
       }
@@ -408,83 +133,10 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
         if (req.headers["x-navigator"] !== "1") throw new HttpError(403, "missing X-Navigator header");
         const fromOrigin = req.headers.origin;
         if (fromOrigin && !allowedHosts.has(new URL(fromOrigin).host)) throw new HttpError(403, "cross-origin request");
-        const body = await readJson(req, u.pathname === "/_navigator/auth/result" ? 256 * 1024 : undefined);
-
-        if (u.pathname === "/_navigator/route") {
-          if (typeof body.path !== "string" || !body.path.startsWith("/")) throw new HttpError(400, "bad path");
-          try {
-            await session.route(body.path);
-            lastError = null;
-            broadcast(snap());
-          } catch (e) {
-            if (!(e instanceof HttpError)) throw e;
-            broadcast({ kind: "notice", message: e.message });
-            throw e;
-          }
-          return ok(res);
-        }
-
-        if (u.pathname === "/_navigator/act") {
-          const values = body.values && typeof body.values === "object" && !Array.isArray(body.values) ? body.values : {};
-          for (const v of Object.values(values)) {
-            if (!["string", "number", "boolean"].includes(typeof v)) throw new HttpError(400, "bad value");
-          }
-          if (!Number.isInteger(body.source)) throw new HttpError(400, "bad source");
-          try {
-            const { focus } = await session.act(body.source, String(body.event), values);
-            broadcast(snap(focus));
-          } catch (e) {
-            if (!(e instanceof HttpError)) throw e;
-            broadcast({ kind: "notice", message: e.message });
-            throw e;
-          }
-          return ok(res);
-        }
-
-        // The user's answer to a host-drawn passkey prompt, or a cancel.
-        if (u.pathname === "/_navigator/auth/result" && auth) {
-          if (typeof body.id !== "string") throw new HttpError(400, "bad id");
-          if (!auth.finishPasskey(body.id, body)) throw new HttpError(404, "no such sign-in request");
-          return ok(res);
-        }
-        // The user's analytics choices, made in the host's own chrome.
-        if (u.pathname === "/_navigator/settings" && analytics) {
-          try {
-            analytics.setLevel(body.analytics);
-          } catch {
-            throw new HttpError(400, "unknown analytics level");
-          }
-          broadcast({ kind: "chrome", chrome: chrome() });
-          return ok(res);
-        }
-        if (u.pathname === "/_navigator/analytics/reset" && analytics) {
-          analytics.resetClient();
-          broadcast({ kind: "chrome", chrome: chrome() });
-          return ok(res);
-        }
-
-        // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
-        if (u.pathname === "/_navigator/prompt/cancel" || u.pathname === "/_navigator/auth/cancel") {
-          if (typeof body.id !== "string") throw new HttpError(400, "bad id");
-          prompts.cancel(body.id);
-          return ok(res);
-        }
-
-        // Sign out, from the host's own chrome. The app is told afterwards and updates itself.
-        if (u.pathname === "/_navigator/signout" && auth) {
-          try {
-            await auth.signOut();
-            const i = sessionStore.info();
-            await session.event({ tag: "session-changed", val: { signedIn: i.signedIn, subject: i.subject, expiresAt: undefined } });
-            broadcast(snap());
-          } catch (e) {
-            if (!(e instanceof HttpError)) throw e;
-            broadcast({ kind: "notice", message: e.message });
-            throw e;
-          }
-          return ok(res);
-        }
-        throw new HttpError(404, "no such endpoint");
+        const endpoint = u.pathname.slice("/_navigator/".length);
+        const body = await readJson(req, endpoint === "auth/result" ? 256 * 1024 : undefined);
+        await controller.handle(endpoint, body);
+        return ok(res);
       }
 
       // Any other GET is an app URL: serve the renderer shell. It asks Lattice Navigator to route location.pathname.
@@ -506,15 +158,19 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
   return {
     port: boundPort,
     uiOrigin: uiOrigin(),
-    manifest,
-    session,
-    host,
-    auth,
-    payments,
-    prompts,
-    sessionStore,
-    analytics,
-    close: async () => { await analytics?.close(); await new Promise((done) => { prompts.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }); },
+    controller,
+    manifest: controller.manifest,
+    session: controller.session,
+    host: controller.host,
+    auth: controller.auth,
+    payments: controller.payments,
+    prompts: controller.prompts,
+    sessionStore: controller.sessionStore,
+    analytics: controller.analytics,
+    close: async () => {
+      await controller.close();
+      await new Promise((done) => { clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); });
+    },
   };
 }
 

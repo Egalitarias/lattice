@@ -4,7 +4,7 @@
 // validates the answer, shows the user a sheet drawn from it, opens the processor's page, and waits
 // for the user to come back. It never uses a price or a URL that came from the component.
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomToken, uuid } from "./bytes.mjs";
 import { fail } from "./prompts.mjs";
 
 const MAX_REPLY = 64 * 1024;
@@ -17,7 +17,7 @@ export const HANDLERS = {
   stripe: { checkoutHosts: ["checkout.stripe.com"] },
 };
 
-const rand = () => randomBytes(32).toString("base64url");
+const rand = () => randomToken(32);
 
 export class PaymentBroker {
   /**
@@ -80,7 +80,7 @@ export class PaymentBroker {
     try {
       res = await this.fetchImpl(`${this.endpoint.replace(/\/$/, "")}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": randomUUID() },
+        headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
         body: JSON.stringify({
           order_ref: orderRef,
           return_url: `${ui}/_navigator/payment/return?state=${state}`,

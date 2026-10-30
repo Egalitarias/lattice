@@ -1,14 +1,14 @@
-// Main-thread owner of the component's worker. Serves its host calls (RPC, session, sign-in),
-// forwards its logs, and kills it if it stops responding.
+// Main-thread owner of the component's thread. Serves its host calls (RPC, storage, session, sign-in,
+// payments), forwards its logs, and kills it if it stops responding.
+//
+// It does not know how threads are made: `spawn(workerData)` returns a handle (postMessage, terminate, and
+// onMessage / onError / onExit slots), supplied by Node (spawn-node.mjs) or by a browser. The same
+// logic therefore runs in both.
 
-import { Worker } from "node:worker_threads";
-import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
 import { MAX_BODY } from "./rpc.mjs";
 import { HostFailure } from "./prompts.mjs";
 import { argsObject } from "./scene.mjs";
-
-const workerFile = join(dirname(fileURLToPath(import.meta.url)), "app-worker.mjs");
+import { b64Encode, utf8 } from "./bytes.mjs";
 
 export class ComponentError extends Error {
   constructor(payload, message) {
@@ -19,7 +19,7 @@ export class ComponentError extends Error {
 export class HostCrash extends Error {}
 export class LinkFailure extends Error {}
 
-const jsonBytes = (v) => Buffer.from(JSON.stringify(v), "utf8");
+const jsonBytes = (v) => utf8(JSON.stringify(v));
 
 export class AppHost {
   #worker = null;
@@ -28,55 +28,45 @@ export class AppHost {
   #sab = new SharedArrayBuffer(16 + MAX_BODY + 4096);
 
   /**
-   * @param opts.entryJs     transpiled component entry module
+   * @param opts.spawn       (workerData) => handle; see above
+   * @param opts.component   what the thread needs to load the transpiled component (opaque to this class)
    * @param opts.granted     capability names the manifest grants
    * @param opts.rpc         RpcClient, or null if the app has no API
    * @param opts.session     SessionStore, or null
    * @param opts.auth        AuthBroker, or null
    * @param opts.payments    PaymentBroker, or null
    * @param opts.analytics   Analytics, or null
+   * @param opts.storage     AppStorage, or null
    * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
    *                         on a host call (the network, a person) does not count.
    */
-  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, payments = null, analytics = null, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, payments, analytics, onLog, watchdogMs, debug });
+  constructor({ spawn, component, granted, rpc = null, session = null, auth = null, payments = null, analytics = null, storage = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { spawn, component, granted: [...granted], rpc, session, auth, payments, analytics, storage, onLog, watchdogMs, debug });
   }
 
   async start() {
-    const worker = new Worker(workerFile, {
-      workerData: {
-        entryJs: this.entryJs,
-        granted: this.granted,
-        origin: this.origin,
-        dataDir: this.dataDir,
-        sab: this.#sab,
-        hasHost: !!(this.rpc || this.session || this.auth || this.payments),
-        debug: this.debug,
-      },
-      // The component gets no environment and no stdio of its own.
-      env: {},
-      stdout: false,
-      stderr: false,
+    const worker = this.spawn({
+      component: this.component,
+      granted: this.granted,
+      sab: this.#sab,
+      hasHost: !!(this.rpc || this.session || this.auth || this.payments || this.storage),
+      debug: this.debug,
     });
     this.#worker = worker;
 
+    // Until the component reports in, a failure means it never started; afterwards it means it died.
     await new Promise((resolve, reject) => {
-      const fail = (e) => reject(e);
-      worker.on("error", fail);
-      worker.once("exit", () => reject(new HostCrash("component stopped before it was ready")));
-      worker.on("message", (m) => {
-        if (m.type === "ready") {
-          worker.off("error", fail);
-          resolve();
-        } else if (m.type === "failed") {
-          reject(m.link ? new LinkFailure(m.message) : new Error(m.message));
-        }
-      });
+      worker.onError = (e) => reject(e instanceof Error ? e : new Error(String(e?.message ?? e)));
+      worker.onExit = () => reject(new HostCrash("component stopped before it was ready"));
+      worker.onMessage = (m) => {
+        if (m.type === "ready") resolve();
+        else if (m.type === "failed") reject(m.link ? new LinkFailure(m.message) : new Error(m.message));
+      };
     });
 
-    worker.on("message", (m) => this.#onMessage(m));
-    worker.on("error", (e) => this.#failAll(new HostCrash(e.message)));
-    worker.on("exit", () => this.#failAll(new HostCrash("component stopped")));
+    worker.onMessage = (m) => this.#onMessage(m);
+    worker.onError = (e) => this.#failAll(new HostCrash(String(e?.message ?? e)));
+    worker.onExit = () => this.#failAll(new HostCrash("component stopped"));
   }
 
   #onMessage(m) {
@@ -136,7 +126,7 @@ export class AppHost {
     } else {
       kind = 2;
       const e = structuredClone(r.error);
-      if (e.tag === "application") e.val.details = Buffer.from(e.val.details ?? []).toString("base64");
+      if (e.tag === "application") e.val.details = b64Encode(e.val.details ?? new Uint8Array());
       bytes = jsonBytes(e);
     }
     if (bytes.length > out.length) {
@@ -169,6 +159,24 @@ export class AppHost {
       case "passkey":
         if (!this.auth) return denied("auth.passkey");
         return { ok: true, bytes: await this.auth.passkey(m.flow, m.options) };
+      case "storage": {
+        if (!this.storage) return denied("storage.local");
+        const s = this.storage;
+        switch (m.op) {
+          case "get": {
+            const v = s.get(m.key);
+            if (v === null) return { ok: true, bytes: Uint8Array.of(0) };
+            const out = new Uint8Array(v.length + 1);
+            out[0] = 1;
+            out.set(v, 1);
+            return { ok: true, bytes: out };
+          }
+          case "set": s.set(m.key, m.value); return { ok: true, bytes: new Uint8Array() };
+          case "delete": s.delete(m.key); return { ok: true, bytes: new Uint8Array() };
+          case "list": return { ok: true, bytes: jsonBytes(s.list(m.prefix)) };
+          default: return { ok: false, error: { tag: "invalid-argument", val: "unknown storage operation" } };
+        }
+      }
       case "payment": {
         if (!this.payments) return denied("payments.request");
         const r = await this.payments.request(m.orderRef);

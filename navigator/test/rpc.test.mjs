@@ -12,8 +12,13 @@ import { fileURLToPath } from "node:url";
 import { loadApp, createServer, hashOf } from "../../server/server.mjs";
 import { createRpc, ApiError, RPC_TYPE, RPC_ERROR_TYPE } from "../../server/rpc.mjs";
 import { startNavigator } from "../navigator.mjs";
-import { fetchApp, prepareComponent } from "../runtime.mjs";
+import { fetchApp } from "../runtime.mjs";
+import { prepareComponent } from "../runtime-node.mjs";
 import { RpcClient, SessionStore } from "../rpc.mjs";
+import { FileKv } from "../kv-node.mjs";
+import { AppStorage } from "../storage.mjs";
+import { nodeSpawn } from "../spawn-node.mjs";
+import { MemoryKv } from "../kv.mjs";
 import { AppHost, HostCrash } from "../apphost.mjs";
 import { encode, decode } from "../../shared/cbor.mjs";
 
@@ -241,7 +246,7 @@ test("host: a valid call carries the API hash, a request id, and the session onl
   const dir = mkdtempSync(join(tmpdir(), "nav-hdr-"));
   try {
     await client(o.endpoint).call("list_tasks", req({}));
-    await client(o.endpoint, { session: new SessionStore(dir, "x.example") }).call("list_tasks", req({}));
+    await client(o.endpoint, { session: new SessionStore(new FileKv(dir), "x.example") }).call("list_tasks", req({}));
     const [without, withSession] = o.seen;
     assert.equal(without.url, "/rpc/list_tasks");
     assert.equal(without.headers["content-type"], RPC_TYPE);
@@ -466,7 +471,7 @@ test("a component that hangs is killed by the watchdog and Lattice Navigator rec
   try {
     const { manifest, wasm } = await fetchApp(`http://127.0.0.1:${port}/`, { dev: true });
     const entryJs = await prepareComponent({ manifest, wasm, cacheDir: join(dir, "cache") });
-    const host = new AppHost({ entryJs, granted: new Set(["storage.local"]), origin: "todo.localhost", dataDir: join(dir, "data"), rpc: null, onLog: quiet, watchdogMs: 400, debug: true });
+    const host = new AppHost({ spawn: nodeSpawn, component: { entryJs }, granted: new Set(["storage.local"]), rpc: null, storage: new AppStorage(new MemoryKv(), "todo.localhost"), onLog: quiet, watchdogMs: 400, debug: true });
     await host.start();
     const launch = { origin: "todo.localhost", locale: "en", colorScheme: "light", reducedMotion: false, textScale: 1, online: true, granted: [], oidcIssuers: [] };
     await host.call("init", launch);

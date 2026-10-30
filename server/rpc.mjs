@@ -2,8 +2,7 @@
 // Validates the request against the API description, calls the handler, validates the response,
 // and encodes errors as application/vnd.lattice.rpc-error+cbor.
 
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
+import { Schema } from "../shared/schema.mjs";
 import { encode, decode } from "../shared/cbor.mjs";
 
 export const RPC_TYPE = "application/vnd.lattice.rpc+cbor";
@@ -38,15 +37,14 @@ export class ApiError extends Error {
 }
 
 export function createRpc({ apiDescription, apiHash, handlers, log = console.error }) {
-  const ajv = new Ajv2020({ strict: false, allErrors: true });
-  addFormats(ajv);
-
   const methods = new Map();
   for (const [name, m] of Object.entries(apiDescription.methods)) {
     if (!handlers[name]) throw new Error(`API method "${name}" has no handler`);
     methods.set(name, {
-      validateRequest: ajv.compile(m.request),
-      validateResponse: ajv.compile(m.response),
+      // The same interpreter the host uses, so both ends agree on what a valid body is. It refuses, at startup,
+      // any schema keyword it would not enforce.
+      request: new Schema(m.request),
+      response: new Schema(m.response),
       declared: new Set((m.errors ?? []).map((e) => e.code)),
       handler: handlers[name],
     });
@@ -92,9 +90,8 @@ export function createRpc({ apiDescription, apiHash, handlers, log = console.err
         if (e instanceof ApiError) throw e;
         return fail(res, 400, "invalid_request", `body is not valid CBOR: ${e.message}`);
       }
-      if (!m.validateRequest(request)) {
-        return fail(res, 400, "invalid_request", ajv.errorsText(m.validateRequest.errors, { separator: "; " }));
-      }
+      const requestProblem = m.request.check(request);
+      if (requestProblem) return fail(res, 400, "invalid_request", requestProblem);
 
       const session = req.headers["lattice-session"];
       // Handlers change the host's session through ctx; the headers are only sent on a 200.
@@ -106,8 +103,9 @@ export function createRpc({ apiDescription, apiHash, handlers, log = console.err
       };
       const result = await m.handler(request, ctx);
 
-      if (!m.validateResponse(result)) {
-        log(`rpc ${method}: handler response violates the API description: ${ajv.errorsText(m.validateResponse.errors)}`);
+      const responseProblem = m.response.check(result);
+      if (responseProblem) {
+        log(`rpc ${method}: handler response violates the API description: ${responseProblem}`);
         return fail(res, 500, "internal", "internal error");
       }
       const body = Buffer.from(encode(result));

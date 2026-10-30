@@ -4,9 +4,8 @@
 // Nothing here trusts what the component says beyond what the manifest's catalog already allows, and
 // nothing here can fail into the app: every entry point swallows its own errors.
 
-import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { randomToken, utf8 } from "./bytes.mjs";
+import { getJson, setJson } from "./kv.mjs";
 
 export const LEVELS = ["off", "errors", "anonymous", "full"];
 export const DEFAULT_LEVEL = "errors";
@@ -92,10 +91,10 @@ export class Analytics {
   /**
    * @param manifest   the verified manifest (its analytics section is the policy)
    * @param processors manifest processors with their endpoints already resolved to reachable addresses
-   * @param dataDir    where the profile's settings and the client id live
+   * @param kv         the profile's store: the user's level and the client id live here
    */
-  constructor({ manifest, processors, dataDir, dev = false, log = () => {}, fetchImpl = fetch, now = () => Date.now(), flushMs = 5000, backoffMs = [1000, 4000, 16000] }) {
-    Object.assign(this, { manifest, dataDir, dev, log, fetchImpl, now, flushMs, backoffMs });
+  constructor({ manifest, processors, kv, dev = false, log = () => {}, fetchImpl = fetch, now = () => Date.now(), flushMs = 5000, backoffMs = [1000, 4000, 16000] }) {
+    Object.assign(this, { manifest, kv, dev, log, fetchImpl, now, flushMs, backoffMs });
     this.catalog = new Map((manifest.analytics?.events ?? []).map((e) => [e.name, e]));
     this.processors = [];
     for (const p of processors ?? []) {
@@ -120,16 +119,9 @@ export class Analytics {
 
   // ---- Settings -----------------------------------------------------------------------------------
 
-  get #settingsFile() {
-    return join(this.dataDir, "settings.json");
-  }
-
   #readLevel() {
-    try {
-      const l = JSON.parse(readFileSync(this.#settingsFile, "utf8")).analytics;
-      if (LEVELS.includes(l)) return l;
-    } catch { /* no settings yet */ }
-    return DEFAULT_LEVEL;
+    const l = getJson(this.kv, "settings")?.analytics;
+    return LEVELS.includes(l) ? l : DEFAULT_LEVEL;
   }
 
   get level() {
@@ -139,10 +131,7 @@ export class Analytics {
   /** The user's choice. Lowering it discards queued events the new level would not send. */
   setLevel(level) {
     if (!LEVELS.includes(level)) throw new RangeError(`unknown analytics level "${level}"`);
-    let settings = {};
-    try { settings = JSON.parse(readFileSync(this.#settingsFile, "utf8")); } catch { /* none yet */ }
-    mkdirSync(this.dataDir, { recursive: true });
-    writeFileSync(this.#settingsFile, JSON.stringify({ ...settings, analytics: level }));
+    setJson(this.kv, "settings", { ...(getJson(this.kv, "settings") ?? {}), analytics: level });
     this.#level = level;
     const before = this.#queue.length;
     this.#queue = this.#queue.filter((e) => RANK[level] >= KINDS[e.kind].min);
@@ -152,23 +141,19 @@ export class Analytics {
 
   // ---- Client id (level "full" only) ---------------------------------------------------------------
 
-  get #clientFile() {
-    return join(this.dataDir, "analytics", this.manifest.app.replace(/[^A-Za-z0-9.-]/g, "_") + ".json");
+  get #clientKey() {
+    return `analytics/client/${this.manifest.app}`;
   }
 
   clientId() {
-    try {
-      const c = JSON.parse(readFileSync(this.#clientFile, "utf8")).client;
-      if (typeof c === "string" && /^c_[A-Za-z0-9_-]{22}$/.test(c)) return c;
-    } catch { /* make one */ }
-    return this.resetClient();
+    const c = getJson(this.kv, this.#clientKey)?.client;
+    return typeof c === "string" && /^c_[A-Za-z0-9_-]{22}$/.test(c) ? c : this.resetClient();
   }
 
   /** A new random id: the old one can no longer be linked to anything sent afterwards. */
   resetClient() {
-    const client = "c_" + randomBytes(16).toString("base64url");
-    mkdirSync(join(this.dataDir, "analytics"), { recursive: true });
-    writeFileSync(this.#clientFile, JSON.stringify({ client }), { mode: 0o600 });
+    const client = "c_" + randomToken(16);
+    setJson(this.kv, this.#clientKey, { client });
     return client;
   }
 
@@ -274,7 +259,7 @@ export class Analytics {
       this.#queue.shift();
       this.stats.dropped++;
     }
-    if (this.#queue.length >= BATCH) setImmediate(() => void this.flush());
+    if (this.#queue.length >= BATCH) setTimeout(() => void this.flush(), 0);
     else this.#schedule();
   }
 
@@ -329,7 +314,7 @@ export class Analytics {
       events: live.map((e) => ({ kind: e.kind, name: e.name, t: stamp(e.t), props: e.props })),
     };
     const body = JSON.stringify(payload);
-    if (Buffer.byteLength(body) > MAX_BODY) {
+    if (utf8(body).length > MAX_BODY) {
       this.stats.dropped += live.length;
       return;
     }

@@ -4,7 +4,7 @@
 // matters itself, waits for the user, and installs the session the server issues. Nothing here
 // trusts a value that came from the component beyond what the manifest already allows.
 
-import { randomBytes, createHash, randomUUID } from "node:crypto";
+import { b64uEncode, fromUtf8, randomToken, sha256, utf8, uuid } from "./bytes.mjs";
 import { applySessionHeaders } from "./rpc.mjs";
 import { Prompts, HostFailure, fail, DEFAULT_TIMEOUT_MS } from "./prompts.mjs";
 
@@ -14,7 +14,7 @@ const isLoopbackHost = (h) => h === "localhost" || h === "127.0.0.1" || h === "[
 
 /** A failure the app may see: carries a WIT `host-error` value. */
 export const AuthFailure = HostFailure;
-const rand = () => randomBytes(32).toString("base64url");
+const rand = () => randomToken(32);
 
 export class AuthBroker {
   /**
@@ -88,7 +88,7 @@ export class AuthBroker {
     const state = rand();
     const nonce = rand();
     const verifier = rand(); // 43 characters of base64url: within RFC 7636's 43-128
-    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const challenge = b64uEncode(await sha256(utf8(verifier)));
     const redirectUri = `${this.uiOrigin()}/_navigator/auth/callback`;
 
     const url = new URL(cfg.authorization_endpoint);
@@ -109,7 +109,7 @@ export class AuthBroker {
     try {
       res = await this.fetchImpl(this.tokenEndpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": randomUUID() },
+        headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
         body: JSON.stringify({ grant: "oidc", issuer, code, code_verifier: verifier, redirect_uri: redirectUri, nonce }),
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
@@ -168,7 +168,7 @@ export class AuthBroker {
     if (optionsBytes.length > MAX_OPTIONS) throw fail("invalid-argument", "options too large");
     let options;
     try {
-      options = JSON.parse(Buffer.from(optionsBytes).toString("utf8"));
+      options = JSON.parse(fromUtf8(optionsBytes));
     } catch {
       throw fail("invalid-argument", "options are not valid JSON");
     }
@@ -185,7 +185,7 @@ export class AuthBroker {
     delete options.extensions; // the app does not get to enable authenticator extensions
 
     const response = await this.prompts.ask({ flow: flow === "create" ? "passkey-create" : "passkey-assert", options });
-    return Buffer.from(response, "utf8");
+    return utf8(response);
   }
 
   /** The window finished (or failed) a passkey ceremony. */
@@ -216,7 +216,7 @@ export class AuthBroker {
       try {
         await this.fetchImpl(this.tokenEndpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": randomUUID() },
+          headers: { "Content-Type": "application/json", "Lattice-Session": this.session.token(), "Lattice-Request-Id": uuid() },
           body: JSON.stringify({ grant: "revoke" }),
           redirect: "error",
           signal: AbortSignal.timeout(5000),

@@ -4,8 +4,7 @@
 // An import is linked only when the manifest grants the capability that backs it. Anything else is
 // simply absent from the import object, so a component that needs it fails to instantiate.
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { fromUtf8 } from "./bytes.mjs";
 
 /** WIT interface -> capabilities that grant it (any one suffices). */
 export const CAPABILITY_IMPORTS = {
@@ -30,7 +29,7 @@ export function hostError(tag, val) {
  * @param hostCall (kind, payload) => { ok, bytes } | { ok: false, error }; blocks until the host answers.
  *                 Provided when the app has an API, a session or auth.
  */
-export function hostImports({ granted, origin, dataDir, onLog, hostCall, post }) {
+export function hostImports({ granted, onLog, hostCall, post }) {
   const imports = {};
 
   imports["lattice:app/log"] = {
@@ -39,41 +38,6 @@ export function hostImports({ granted, origin, dataDir, onLog, hostCall, post })
     },
   };
 
-  if (["storage.local", "storage.sync"].some((c) => granted.has(c))) {
-    const dir = join(dataDir, origin.replace(/[^A-Za-z0-9.-]/g, "_"));
-    const file = join(dir, "storage.json");
-    const MAX_KEYS = 1000;
-    const MAX_VALUE = 1024 * 1024;
-
-    const read = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {});
-    const write = (data) => {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(file, JSON.stringify(data));
-    };
-
-    imports["lattice:app/storage"] = {
-      get(key) {
-        const v = read()[key];
-        return v === undefined ? undefined : new Uint8Array(Buffer.from(v, "base64"));
-      },
-      set(key, value) {
-        if (value.length > MAX_VALUE) throw hostError("invalid-argument", "value too large");
-        const data = read();
-        if (!(key in data) && Object.keys(data).length >= MAX_KEYS) throw hostError("invalid-argument", "too many keys");
-        data[key] = Buffer.from(value).toString("base64");
-        write(data);
-      },
-      delete(key) {
-        const data = read();
-        delete data[key];
-        write(data);
-      },
-      listKeys(prefix) {
-        return Object.keys(read()).filter((k) => k.startsWith(prefix));
-      },
-    };
-  }
-
   /** Unwrap a host-call result: bytes on success, otherwise throw the WIT error carried in the result. */
   const unwrap = (r) => {
     if (r.ok) return r.bytes;
@@ -81,7 +45,7 @@ export function hostImports({ granted, origin, dataDir, onLog, hostCall, post })
     err.payload = r.error; // rpc-error for rpc calls, host-error for the rest (see apphost.mjs)
     throw err;
   };
-  const json = (bytes) => JSON.parse(Buffer.from(bytes).toString("utf8"));
+  const json = (bytes) => JSON.parse(fromUtf8(bytes));
   const sessionInfo = (bytes) => {
     const i = json(bytes);
     return { signedIn: i.signedIn, subject: i.subject ?? undefined, expiresAt: i.expiresAt == null ? undefined : BigInt(i.expiresAt) };
@@ -89,6 +53,20 @@ export function hostImports({ granted, origin, dataDir, onLog, hostCall, post })
   const need = (cap) => {
     if (!granted.has(cap)) throw hostError("capability-denied", cap);
   };
+
+  // Storage lives on the main thread (the host's kv); the component reaches it with a blocking call. A get
+  // returns one byte (0 = absent, 1 = present) followed by the value.
+  if (hostCall && ["storage.local", "storage.sync"].some((c) => granted.has(c))) {
+    imports["lattice:app/storage"] = {
+      get(key) {
+        const r = unwrap(hostCall("storage", { op: "get", key }));
+        return r[0] === 1 ? r.slice(1) : undefined;
+      },
+      set: (key, value) => void unwrap(hostCall("storage", { op: "set", key, value })),
+      delete: (key) => void unwrap(hostCall("storage", { op: "delete", key })),
+      listKeys: (prefix) => json(unwrap(hostCall("storage", { op: "list", prefix }))),
+    };
+  }
 
   if (hostCall && ["net.origin", "net.realtime"].some((c) => granted.has(c))) {
     imports["lattice:app/rpc"] = {

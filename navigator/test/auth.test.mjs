@@ -18,6 +18,7 @@ import { ApiError, RPC_TYPE } from "../../server/rpc.mjs";
 import { startNavigator } from "../navigator.mjs";
 import { AuthBroker, AuthFailure } from "../auth.mjs";
 import { RpcClient, SessionStore, parseSetSession, applySessionHeaders } from "../rpc.mjs";
+import { FileKv } from "../kv-node.mjs";
 import { encode, decode } from "../../shared/cbor.mjs";
 import { FakeAuthenticator } from "./fake-authenticator.mjs";
 
@@ -391,7 +392,7 @@ test("host: a signed-in session expires into a fresh anonymous one", () => {
   const dir = mkdtempSync(join(tmpdir(), "nav-exp-"));
   try {
     let t = 1_700_000_000_000;
-    const store = new SessionStore(dir, "x.example", { now: () => t });
+    const store = new SessionStore(new FileKv(dir), "x.example", { now: () => t });
     const anon = store.token();
     store.set({ token: "B".repeat(43), subject: "u", name: "U", expires: t / 1000 + 60 });
     assert.equal(store.token(), "B".repeat(43));
@@ -413,7 +414,7 @@ test("host: session headers on RPC responses are applied only when valid, on suc
   const port = await listen(server);
   const mk = (session) => new RpcClient({ endpoint: `http://127.0.0.1:${port}/rpc`, description: api, apiHash: "sha256-" + "A".repeat(43), session });
   try {
-    const store = new SessionStore(dir, "x.example");
+    const store = new SessionStore(new FileKv(dir), "x.example");
     const before = store.token();
     const ok = (res, headers) => { const b = Buffer.from(encode({ signed_in: false, name: "", pro: false })); res.writeHead(200, { "Content-Type": RPC_TYPE, ...headers }); res.end(b); };
 

@@ -1,6 +1,14 @@
 // Lattice Navigator renderer. Receives a validated scene tree from Lattice Navigator and projects it onto semantic elements.
 // It never evaluates app-provided strings as markup (everything is textContent / attributes), and
 // it sends back only {source node id, event, field values}. Lattice Navigator decides what action that means.
+//
+// It talks to the Navigator through a *transport*, so the same renderer serves both builds:
+//   - Node: HTTP + server-sent events to the local Navigator process (ui-http.js)
+//   - browser: direct calls into the in-page controller (browser/main.mjs)
+//
+//   transport.post(endpoint, body) -> Promise<{ ok: true } | { ok: false, error }>
+//   transport.subscribe(handler)   -> handler receives each message (scene, notice, prompt, chrome, ...)
+//   transport.state()              -> Promise<the current state message>
 
 const appEl = document.getElementById("app");
 const noticeEl = document.getElementById("notice");
@@ -12,16 +20,11 @@ let noticeTimer;
 
 // ---- Talking to Lattice Navigator --------------------------------------------------------------------------
 
+let transport;
+
 async function post(endpoint, body) {
-  const res = await fetch(`/_navigator/${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Navigator": "1" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const { error } = await res.json().catch(() => ({}));
-    notice(error ?? `Something went wrong (${res.status}).`);
-  }
+  const r = await transport.post(endpoint, body);
+  if (!r.ok) notice(r.error ?? "Something went wrong.");
 }
 
 function notice(message) {
@@ -294,7 +297,7 @@ function privacyEl(p) {
   d.addEventListener("toggle", () => {
     privacyOpen = d.open;
     // Counters and recent events change without a scene update; refresh them when the panel is opened.
-    if (d.open) fetch("/_navigator/state").then((r) => r.json()).then((m) => m.chrome && renderChrome(m.chrome)).catch(() => {});
+    if (d.open) transport.state().then((m) => m.chrome && renderChrome(m.chrome)).catch(() => {});
   });
   d.append(h("summary", {}, `Analytics: ${LEVEL_LABEL[p.level] ?? p.level}`));
 
@@ -442,24 +445,26 @@ async function proceed(p, button, status) {
 
 // ---- Boot -------------------------------------------------------------------------------------
 
-const events = new EventSource("/_navigator/events");
-let first = true;
-events.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.kind === "scene") {
-    // The first message reflects wherever Lattice Navigator started. If the address differs, navigate there.
-    if (first && location.pathname !== msg.path) {
+/** Start rendering. Called once, by whichever build supplies the transport. */
+export function mountUi(t) {
+  transport = t;
+  let first = true;
+  transport.subscribe((msg) => {
+    if (msg.kind === "scene") {
+      // The first message reflects wherever the Navigator started. If the address differs, navigate there.
+      if (first && location.pathname !== msg.path) {
+        first = false;
+        navigate(location.pathname + location.search, { push: false });
+        return;
+      }
       first = false;
-      navigate(location.pathname + location.search, { push: false });
-      return;
-    }
-    first = false;
-    render(msg);
-    renderChrome(msg.chrome);
-  } else if (msg.kind === "notice") notice(msg.message);
-  else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); renderChrome(msg.chrome); }
-  else if (msg.kind === "chrome") renderChrome(msg.chrome);
-  else if (msg.kind === "prompt") showAuth(msg.prompt);
-  else if (msg.kind === "prompt-end") closeAuth(msg.id);
-};
-addEventListener("popstate", () => navigate(location.pathname + location.search, { push: false }));
+      render(msg);
+      renderChrome(msg.chrome);
+    } else if (msg.kind === "notice") notice(msg.message);
+    else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); renderChrome(msg.chrome); }
+    else if (msg.kind === "chrome") renderChrome(msg.chrome);
+    else if (msg.kind === "prompt") showAuth(msg.prompt);
+    else if (msg.kind === "prompt-end") closeAuth(msg.id);
+  });
+  addEventListener("popstate", () => navigate(location.pathname + location.search, { push: false }));
+}
