@@ -175,6 +175,22 @@ export class SceneStore {
     return this.#nodes.get(id)?.body.val?.[field];
   }
 
+  /** Names of the sensitive inputs under the Form that contains `id` (or `id` itself). */
+  sensitiveFields(id) {
+    const parentOf = new Map();
+    for (const n of this.#nodes.values()) for (const c of n.children) parentOf.set(c, n.id);
+    let cur = id;
+    while (cur !== undefined && this.#nodes.get(cur)?.body.tag !== "form") cur = parentOf.get(cur);
+    const names = new Set();
+    const walk = (nid) => {
+      const n = this.#nodes.get(nid);
+      if (n.body.tag === "input" && n.body.val.sensitive) names.add(n.body.val.name);
+      n.children.forEach(walk);
+    };
+    walk(cur ?? id);
+    return names;
+  }
+
   /** Names of the form fields under the Form that contains `id` (or under `id` itself if a Form). */
   formFields(id) {
     const parentOf = new Map();

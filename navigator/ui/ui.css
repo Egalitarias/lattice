@@ -83,3 +83,10 @@ dialog#auth::backdrop { background: rgb(0 0 0 / .45); }
 dialog#auth h2 { margin: 0 0 var(--s-sm); }
 dialog#auth p { margin: 0 0 var(--s-md); }
 dialog#auth .pay-lines { margin: 0 0 var(--s-sm); padding-left: 1.25rem; }
+
+/* The privacy control in the host chrome. */
+#chrome details.privacy { flex-basis: 100%; }
+#chrome details.privacy summary { cursor: pointer; }
+#chrome details.privacy ul { margin: 0 0 var(--s-xs); padding-left: 1.25rem; }
+#chrome details.privacy p { margin: var(--s-xs) 0; }
+#chrome details.privacy .recent { font-family: ui-monospace, Consolas, monospace; font-size: .8125rem; word-break: break-all; }

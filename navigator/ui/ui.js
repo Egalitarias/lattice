@@ -280,6 +280,51 @@ function render(msg) {
 
 const chromeEl = document.getElementById("chrome");
 
+// ---- Privacy control ---------------------------------------------------------------------------
+// The user's analytics choices and a window onto what has actually been sent. All text is composed here
+// from the manifest's declarations and the host's own counters; nothing the app can influence at run time
+// appears except event names and properties, which the manifest's catalog already constrains.
+
+const LEVEL_LABEL = { off: "Off", errors: "Errors only", anonymous: "Anonymous", full: "Full (with a resettable ID)" };
+let privacyOpen = false;
+
+function privacyEl(p) {
+  const d = h("details", { class: "privacy" });
+  d.open = privacyOpen;
+  d.addEventListener("toggle", () => {
+    privacyOpen = d.open;
+    // Counters and recent events change without a scene update; refresh them when the panel is opened.
+    if (d.open) fetch("/_navigator/state").then((r) => r.json()).then((m) => m.chrome && renderChrome(m.chrome)).catch(() => {});
+  });
+  d.append(h("summary", {}, `Analytics: ${LEVEL_LABEL[p.level] ?? p.level}`));
+
+  const field = h("div", { class: "field" });
+  const select = h("select", { id: "privacy-level" });
+  for (const l of p.levels) select.append(h("option", { value: l }, LEVEL_LABEL[l] ?? l));
+  select.value = p.level;
+  select.addEventListener("change", () => post("settings", { analytics: select.value }));
+  field.append(h("label", { for: "privacy-level" }, "What this app may send"), select);
+  d.append(field);
+
+  d.append(h("p", {}, "Data can go to:"));
+  const procs = h("ul", {});
+  for (const x of p.processors) procs.append(h("li", {}, `${x.name} (${x.host}): ${x.purposes.join(", ")}`));
+  d.append(procs);
+
+  const s = p.stats;
+  d.append(h("p", {}, `Sent ${s.sent} · held back ${s.held} · dropped ${s.dropped} · failed ${s.failed}`));
+  if (p.client) {
+    const reset = h("button", { type: "button" }, "Reset my analytics ID");
+    reset.addEventListener("click", () => post("analytics/reset", {}));
+    d.append(reset);
+  }
+  d.append(h("p", {}, p.recent.length ? "Last events sent:" : "No events have been sent."));
+  const recent = h("ul", { class: "recent" });
+  for (const e of [...p.recent].reverse()) recent.append(h("li", {}, `${e.name} ${JSON.stringify(e.props)} → ${e.to.join(", ")}`));
+  d.append(recent);
+  return d;
+}
+
 function renderChrome(c) {
   if (!c) return;
   const parts = [h("strong", {}, c.app.domain)];
@@ -291,6 +336,7 @@ function renderChrome(c) {
       parts.push(out);
     }
   }
+  if (c.privacy) parts.push(privacyEl(c.privacy));
   chromeEl.replaceChildren(...parts);
   chromeEl.hidden = false;
   // A window that connects mid-flow still shows the pending prompt.
@@ -412,6 +458,7 @@ events.onmessage = (e) => {
     renderChrome(msg.chrome);
   } else if (msg.kind === "notice") notice(msg.message);
   else if (msg.kind === "error") { first = false; appEl.replaceChildren(h("p", { role: "alert" }, msg.message)); renderChrome(msg.chrome); }
+  else if (msg.kind === "chrome") renderChrome(msg.chrome);
   else if (msg.kind === "prompt") showAuth(msg.prompt);
   else if (msg.kind === "prompt-end") closeAuth(msg.id);
 };

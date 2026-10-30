@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use exports::lattice::app::lifecycle::{ActionCall, Guest, HostEvent, Launch, RouteRequest};
+use lattice::app::analytics;
 use lattice::app::auth;
 use lattice::app::log::{self, Level};
 use lattice::app::payments;
@@ -148,20 +149,34 @@ struct Named {
     name: String,
 }
 
+/// Record a product event. The host checks it against the manifest's catalog and the user's analytics
+/// level, redacts it, and decides whether anything is sent. This code cannot tell, and does not need to.
+fn track(name: &str, props: &[(&str, Scalar)]) {
+    let props: Vec<(String, Scalar)> = props.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    analytics::emit(name, &props);
+}
+
+/// A failure that is the app's or the host's fault rather than the user's: reported (the host scrubs it)
+/// and returned.
+fn internal(name: &str, detail: String) -> AppError {
+    analytics::report_error(name, &detail);
+    AppError::Internal(detail)
+}
+
 /// Encode `req`, call `method`, decode the reply. Server-declared errors become messages for the
 /// user; everything else is logged and shown as a generic failure.
 fn api<Req: Serialize, Res: DeserializeOwned>(method: &str, req: &Req) -> Result<Res, AppError> {
     let mut body = Vec::new();
-    ciborium::into_writer(req, &mut body).map_err(|e| AppError::Internal(format!("encode {method}: {e}")))?;
+    ciborium::into_writer(req, &mut body).map_err(|e| internal("rpc_encode", format!("encode {method}: {e}")))?;
     match rpc::call(method, &body) {
-        Ok(bytes) => ciborium::from_reader(bytes.as_slice()).map_err(|e| AppError::Internal(format!("decode {method}: {e}"))),
+        Ok(bytes) => ciborium::from_reader(bytes.as_slice()).map_err(|e| internal("rpc_decode", format!("decode {method}: {e}"))),
         Err(RpcError::Application(e)) if e.code == "unauthorized" => Err(AppError::Unauthorized),
         Err(RpcError::Application(e)) => Err(AppError::Invalid(e.message)),
         Err(RpcError::Transport(msg)) => {
             log::write(Level::Warn, &format!("{method}: {msg}"));
             Err(AppError::Invalid("Could not reach the server. Please try again.".into()))
         }
-        Err(RpcError::Host(e)) => Err(AppError::Internal(format!("{method}: {e:?}"))),
+        Err(RpcError::Host(e)) => Err(internal("rpc_host", format!("{method}: {e:?}"))),
     }
 }
 
@@ -173,7 +188,7 @@ fn host_err_for(what: &str, e: HostError) -> AppError {
         HostError::InvalidArgument(m) => AppError::Invalid(format!("{what} failed: {m}")),
         HostError::CapabilityDenied(c) | HostError::CapabilityRevoked(c) => AppError::Invalid(format!("Not permitted: {c}")),
         HostError::RateLimited => AppError::Invalid("Please wait a moment and try again.".into()),
-        HostError::Internal(m) => AppError::Internal(m),
+        HostError::Internal(m) => internal("host_internal", m),
     }
 }
 
@@ -506,6 +521,7 @@ fn confirm_payment() -> Result<Update, AppError> {
                 s.note = None;
             });
             load_profile()?;
+            track("upgrade_confirmed", &[]);
             Ok(refresh(None))
         }
         "failed" | "expired" => {
@@ -526,7 +542,7 @@ fn options_text(o: Options) -> Vec<u8> {
 }
 
 fn response_text(bytes: Vec<u8>) -> Result<String, AppError> {
-    String::from_utf8(bytes).map_err(|_| AppError::Internal("host returned non-UTF-8".into()))
+    String::from_utf8(bytes).map_err(|_| internal("host_non_utf8", "host returned non-UTF-8".into()))
 }
 
 struct TasksApp;
@@ -559,6 +575,8 @@ impl Guest for TasksApp {
                 }
                 let reply: TaskReply = api("add_task", &AddTask { title: &title })?;
                 STATE.with(|s| s.borrow_mut().tasks.push(reply.task));
+                let n = STATE.with(|s| s.borrow().tasks.len());
+                track("task_added", &[("tasks", Scalar::Integer(n as i64))]);
                 let mut update = refresh(Some(INPUT));
                 // Re-sending the input with an empty value clears the field.
                 update.ops.push(PatchOp::SetNode(input_node()));
@@ -573,12 +591,14 @@ impl Guest for TasksApp {
                         *t = reply.task;
                     }
                 });
+                track("task_done", &[("done", Scalar::Boolean(done))]);
                 Ok(refresh(None))
             }
             "delete_task" => {
                 let id = arg_int(&call, "id").ok_or_else(|| AppError::Invalid("missing id".into()))?;
                 let _: Nothing = api("delete_task", &DeleteTask { id })?;
                 STATE.with(|s| s.borrow_mut().tasks.retain(|t| t.id != id));
+                track("task_deleted", &[]);
                 Ok(refresh(Some(INPUT)))
             }
 
@@ -591,21 +611,25 @@ impl Guest for TasksApp {
                 let begin: Options = api("passkey_register_begin", &RegisterBegin { name: name.trim() })?;
                 let created = auth::passkey_create(&options_text(begin)).map_err(host_err)?;
                 let _: Named = api("passkey_register_finish", &Finish { response: &response_text(created)? })?;
+                track("signed_in", &[("method", Scalar::Text("passkey".into()))]);
                 after_session_change()
             }
             "passkey_login" => {
                 let begin: Options = api("passkey_login_begin", &Empty {})?;
                 let asserted = auth::passkey_assert(&options_text(begin)).map_err(host_err)?;
                 let _: Named = api("passkey_login_finish", &Finish { response: &response_text(asserted)? })?;
+                track("signed_in", &[("method", Scalar::Text("passkey".into()))]);
                 after_session_change()
             }
             "oidc_login" => {
                 let issuer = arg_text(&call, "issuer").ok_or_else(|| AppError::Invalid("missing issuer".into()))?;
                 auth::sign_in_oidc(&issuer).map_err(host_err)?;
+                track("signed_in", &[("method", Scalar::Text("oidc".into()))]);
                 after_session_change()
             }
             "sign_out" => {
                 session::sign_out();
+                track("signed_out", &[]);
                 STATE.with(|s| {
                     let mut s = s.borrow_mut();
                     s.pending_order = None;
@@ -618,6 +642,7 @@ impl Guest for TasksApp {
             // The server prices the order. The host shows the user what the server says and takes them to the
             // processor. What comes back is "the user returned", not "the user paid": the server decides that.
             "buy_pro" => {
+                track("upgrade_started", &[]);
                 let order: Order = api("create_order", &CreateOrder { sku: "pro" })?;
                 payments::request(&order.order_ref).map_err(|e| host_err_for("Payment", e))?;
                 STATE.with(|s| {

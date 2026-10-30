@@ -174,7 +174,7 @@ test("pay: the watchdog does not kill a component waiting on a person to pay", a
 });
 
 test("pay: an app that is not granted payments.request cannot be linked", async () => {
-  await assert.rejects(stack(async () => {}, { requires: ["net.origin", "session", "auth.oidc", "auth.passkey"] }), /could not be linked/);
+  await assert.rejects(stack(async () => {}, { requires: ["net.origin", "session", "auth.oidc", "auth.passkey", "analytics.event"] }), /could not be linked/);
 });
 
 test("pay: without a processor configured, the app says so and nothing breaks", async () => {

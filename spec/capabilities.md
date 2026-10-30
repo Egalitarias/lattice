@@ -42,7 +42,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 | `payments.request` | Ask the user to pay for a server-created order via a processor's hosted checkout. The app names the order; the host gets the price and URL from the server and draws the sheet. Returns a receipt, which is not proof of payment (`payments.md`) | host UI | each time |
 | `payments.mandate` | Recurring-payment consent, visible and revocable in host settings | host UI | each time |
 | `ads.slot` | Allows `AdSlot` nodes to be filled by the host | host UI | none (user sets global ad level) |
-| `analytics.event` | Emit typed events to endpoints declared in `analytics.processors` | data | none (user sets global level) |
+| `analytics.event` | Record events from the manifest's declared catalog and report errors. The host validates, redacts, applies the user's level, and is the only sender (`analytics.md`) | data | none (user sets the level) |
 | `experiments` | Variant assignment and exposure logging | data | none |
 
 ## Device and platform

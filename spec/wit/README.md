@@ -74,6 +74,8 @@ will round-trip scenes between the two forms.
 - A control's `on-change` receives only that control's value, keyed by its `name`.
 - The UI layer never sends action names or arguments. It reports "node N, event E, values V"; the host looks up the
   action reference it received from the app and rejects values for fields outside the node's form.
+- Analytics (`analytics`) is fire and forget: the app cannot tell whether anything was sent, cannot choose a destination, and
+  can only emit what the manifest's catalog declares; the host applies the user's level and does the sending (`analytics.md`).
 - Payment is driven by the host (`payments`): the app passes only an order reference; the host gets the price and the
   checkout URL from the app's own server, and a receipt means the user came back, not that they paid (`payments.md`).
 - Sign-in is driven by the host (`auth`, `session`), never by the app: the component asks, the host draws the dialog,

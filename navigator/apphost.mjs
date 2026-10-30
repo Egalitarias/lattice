@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { MAX_BODY } from "./rpc.mjs";
 import { HostFailure } from "./prompts.mjs";
+import { argsObject } from "./scene.mjs";
 
 const workerFile = join(dirname(fileURLToPath(import.meta.url)), "app-worker.mjs");
 
@@ -33,11 +34,12 @@ export class AppHost {
    * @param opts.session     SessionStore, or null
    * @param opts.auth        AuthBroker, or null
    * @param opts.payments    PaymentBroker, or null
+   * @param opts.analytics   Analytics, or null
    * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
    *                         on a host call (the network, a person) does not count.
    */
-  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, payments = null, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, payments, onLog, watchdogMs, debug });
+  constructor({ entryJs, granted, origin, dataDir, rpc = null, session = null, auth = null, payments = null, analytics = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { entryJs, granted: [...granted], origin, dataDir, rpc, session, auth, payments, analytics, onLog, watchdogMs, debug });
   }
 
   async start() {
@@ -80,6 +82,7 @@ export class AppHost {
   #onMessage(m) {
     if (m.type === "log") return void this.onLog?.(m.level, m.message);
     if (m.type === "host") return void this.#serveHostCall(m);
+    if (m.type === "analytics") return void this.#fromApp(m);
     const p = this.#pending.get(m.id);
     if (!p) return;
     this.#pending.delete(m.id);
@@ -87,6 +90,16 @@ export class AppHost {
     if (m.ok) p.resolve(m.value);
     else if ("payload" in m) p.reject(new ComponentError(m.payload));
     else p.reject(new Error(m.message));
+  }
+
+  /** Analytics from the component: fire and forget, and nothing it sends can throw back into the host. */
+  #fromApp(m) {
+    try {
+      if (m.op === "emit" && typeof m.name === "string" && Array.isArray(m.props)) this.analytics?.emit(m.name, argsObject(m.props));
+      else if (m.op === "report-error") this.analytics?.reportError(String(m.name), String(m.detail));
+    } catch {
+      /* a malformed message is dropped */
+    }
   }
 
   /** (Re)start the watchdog for the call in flight. */

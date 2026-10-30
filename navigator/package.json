@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "start": "node navigator.mjs",
-    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs"
+    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs test/analytics.test.mjs"
   },
   "dependencies": {
     "@bytecodealliance/jco": "^1.40.0",

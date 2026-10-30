@@ -6,7 +6,7 @@ and replaces the application layer with typed, compiled, semantic parts.
 
 **Lattice Navigator** (the "Navigator" for short) is the host/client that runs Lattice apps.
 
-> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, sign-in with OIDC and passkeys, hosted-checkout payments, two reference apps).
+> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, typed RPC, sign-in with OIDC and passkeys, hosted-checkout payments, privacy-controlled analytics, two reference apps).
 > Not production software: see "Prototype limits" below.
 
 ## Principles
@@ -104,6 +104,11 @@ cd server && node server.mjs --app ../examples/tasks --port 8080 --dev \
     --stripe-key sk_test_dev --stripe-webhook-secret whsec_dev --stripe-api http://127.0.0.1:9200
 ```
 
+Analytics: the `tasks` app declares a first-party processor and a catalog of events. By default only error reports may
+leave (level "errors only"); open the Privacy control in the strip at the top to choose Off / Errors only / Anonymous / Full,
+see who receives what, and read the events that were actually sent. `GET /events/summary` on the server shows what its
+collector has received.
+
 With real Stripe, use your own test-mode keys and drop `--stripe-api`; point a webhook endpoint at `https://<your domain>/pay/webhook`.
 **That has not been tried**: nothing here has run against the live Stripe service.
 
@@ -116,10 +121,11 @@ Tests:
 
 ```
 cd spec && npm install && npm run validate        # schemas, fixtures, WIT parses, WIT/schema agree
-cd navigator && npm test                                # 79 end-to-end tests with the real components
+cd navigator && npm test                                # 109 end-to-end tests with the real components
 cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Edge/Chrome through the UI
 cd navigator && node test/auth-browser-check.mjs                      # sign-in in Edge/Chrome with a virtual authenticator
 cd navigator && node test/payments-browser-check.mjs                  # a full purchase in Edge/Chrome
+cd navigator && node test/analytics-browser-check.mjs                 # the Privacy control in Edge/Chrome
 ```
 
 ## Prototype limits
@@ -139,6 +145,11 @@ cd navigator && node test/payments-browser-check.mjs                  # a full p
   The server only accepts return addresses on the app's own domain, and Navigator serves its page there only for
   `*.localhost` names, so (like passkeys) payments work for `.localhost` apps in this prototype.
   See `spec/payments.md`.
+- Analytics: product events, host timings and error reports, with four user-set levels, a declared event catalog,
+  redaction and a transparency panel (`spec/analytics.md`). The collector in the example keeps events in memory.
+  Not specified: experiments / A/B assignment, session replay, consent flows, per-purpose levels, retention. Redaction
+  catches values the user typed into sensitive inputs and common personal-data patterns in error text; it cannot catch
+  data the app has transformed. The processor's server necessarily sees the user's IP address.
 - RPC: no streaming, no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps
   state in memory.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
@@ -157,7 +168,8 @@ cd navigator && node test/payments-browser-check.mjs                  # a full p
 5. [ ] Browser-only Lattice Navigator (service worker + transpiled WASM)
 6. [x] Auth: OIDC and passkeys, host-drawn sign-in, session upgrade
 6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
-6c. [ ] Analytics, then a host-drawn payment sheet
+6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
+6d. [ ] A host-drawn payment sheet, experiments
 7. [ ] A 2D multiplayer world (WebTransport + canvas)
 
 ## License

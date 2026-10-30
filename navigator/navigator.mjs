@@ -15,6 +15,7 @@ import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
 import { RpcClient, SessionStore } from "./rpc.mjs";
 import { AuthBroker } from "./auth.mjs";
 import { PaymentBroker } from "./payments.mjs";
+import { Analytics } from "./analytics.mjs";
 import { Prompts } from "./prompts.mjs";
 import { CAPABILITY_IMPORTS } from "./host.mjs";
 import { SceneStore, SceneError, toArgs, argsObject } from "./scene.mjs";
@@ -70,17 +71,18 @@ function appFailure(e) {
   return null;
 }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
 // ---- The session ------------------------------------------------------------------------------
 
-class Session {
+export class Session {
   store = new SceneStore();
   path = "/";
   #chain = Promise.resolve();
-  constructor(host, manifest, origin, log) {
+  constructor(host, manifest, origin, log, analytics = null) {
+    this.analytics = analytics;
     this.host = host;
     this.manifest = manifest;
     this.routes = compileRoutes(manifest.routes);
@@ -103,12 +105,16 @@ class Session {
       if (e instanceof HttpError) throw e;
       if (e instanceof HostCrash) {
         this.log("error", `component stopped: ${e.message}`);
+        this.analytics?.host("error", "host.crash", { detail: e.message });
         await this.#recover();
         throw new HttpError(504, "The app stopped responding and was restarted.");
       }
       const f = appFailure(e);
       if (!f) throw e;
-      if (f.detail) this.log("error", `app error: ${f.detail}`);
+      if (f.detail) {
+        this.log("error", `app error: ${f.detail}`);
+        this.analytics?.host("error", "app.internal", { detail: f.detail });
+      }
       throw new HttpError(f.status, f.message);
     }
   }
@@ -141,6 +147,7 @@ class Session {
     const u = new URL(rawPath, "http://x");
     const m = matchRoute(this.routes, u.pathname);
     if (!m) throw new HttpError(404, "That page does not exist.");
+    const t0 = performance.now();
     const scene = await this.host.call("route", {
       handler: m.handler,
       path: u.pathname,
@@ -150,9 +157,13 @@ class Session {
     try {
       this.store.load(scene);
     } catch (e) {
-      if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid scene: ${e.message}`);
+      if (e instanceof SceneError) {
+        this.analytics?.host("error", "host.invalid_scene", { detail: e.message });
+        throw new HttpError(500, `The app returned an invalid scene: ${e.message}`);
+      }
       throw e;
     }
+    this.analytics?.host("performance", "host.route", { handler: m.handler, ms: performance.now() - t0 });
     this.path = u.pathname;
   }
 
@@ -180,6 +191,11 @@ class Session {
           if (!allowed.has(k)) throw new HttpError(400, `unexpected field ${k}`);
         }
 
+        // Remember what the user typed into sensitive fields, so it can be scrubbed from anything sent.
+        const sensitive = this.store.sensitiveFields(source);
+        this.analytics?.noteSensitive(Object.entries(values).filter(([k]) => sensitive.has(k)).map(([, v]) => v));
+
+        const t0 = performance.now();
         const update = await this.host.call("dispatch", {
           action: ref.action,
           args: ref.args,
@@ -190,9 +206,13 @@ class Session {
         try {
           this.store.apply(update);
         } catch (e) {
-          if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
+          if (e instanceof SceneError) {
+            this.analytics?.host("error", "host.invalid_scene", { detail: e.message });
+            throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
+          }
           throw e;
         }
+        this.analytics?.host("performance", "host.action", { action: ref.action, ms: performance.now() - t0 });
         return { focus: update.focus };
       })
     );
@@ -257,8 +277,8 @@ async function readJson(req, max = 64 * 1024) {
 const CALLBACK_PAGE = (message) =>
   `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lattice Navigator</title><body><main><h1>Lattice Navigator</h1><p>${message}</p></main>`;
 
-export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs }) {
-  const { url: appUrl, manifest, wasm, api, tokenEndpoint, paymentsEndpoint } = await fetchApp(url, { dev });
+export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), cacheDir = join(dataDir, "cache"), log = defaultLog, watchdogMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {} }) {
+  const { url: appUrl, manifest, wasm, api, tokenEndpoint, paymentsEndpoint, analyticsProcessors } = await fetchApp(url, { dev });
   const domain = manifest.app;
   const entryJs = await prepareComponent({ manifest, wasm, cacheDir });
 
@@ -293,7 +313,11 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
       })
     : null;
 
-  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, payments, onLog: log, watchdogMs });
+  // Analytics policy lives in the manifest; the user's level lives in this profile. Without declared
+  // processors there is nothing to configure and nothing is ever sent.
+  const analytics = analyticsProcessors ? new Analytics({ manifest, processors: analyticsProcessors, dataDir, dev, log, ...analyticsOptions }) : null;
+
+  const host = new AppHost({ entryJs, granted, origin: domain, dataDir: join(dataDir, "data"), rpc, session: granted.has("session") ? sessionStore : null, auth, payments, analytics, onLog: log, watchdogMs });
   try {
     await host.start();
   } catch (e) {
@@ -305,7 +329,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     }
     throw e;
   }
-  const session = new Session(host, manifest, domain, log);
+  const session = new Session(host, manifest, domain, log, analytics);
   await session.init();
 
   const startPath = appUrl.pathname || "/";
@@ -325,6 +349,7 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
       app: { name: manifest.name ?? domain, domain },
       session: i ? { signedIn: i.signedIn, name: i.name ?? null } : null,
       prompts: prompts.list(),
+      privacy: analytics ? analytics.snapshot() : null,
     };
   };
   const snap = (focus) => ({ ...session.snapshot(focus), chrome: chrome() });
@@ -422,6 +447,22 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
           if (!auth.finishPasskey(body.id, body)) throw new HttpError(404, "no such sign-in request");
           return ok(res);
         }
+        // The user's analytics choices, made in the host's own chrome.
+        if (u.pathname === "/_navigator/settings" && analytics) {
+          try {
+            analytics.setLevel(body.analytics);
+          } catch {
+            throw new HttpError(400, "unknown analytics level");
+          }
+          broadcast({ kind: "chrome", chrome: chrome() });
+          return ok(res);
+        }
+        if (u.pathname === "/_navigator/analytics/reset" && analytics) {
+          analytics.resetClient();
+          broadcast({ kind: "chrome", chrome: chrome() });
+          return ok(res);
+        }
+
         // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
         if (u.pathname === "/_navigator/prompt/cancel" || u.pathname === "/_navigator/auth/cancel") {
           if (typeof body.id !== "string") throw new HttpError(400, "bad id");
@@ -472,7 +513,8 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     payments,
     prompts,
     sessionStore,
-    close: () => new Promise((done) => { prompts.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }),
+    analytics,
+    close: async () => { await analytics?.close(); await new Promise((done) => { prompts.dispose(); host.kill(); clients.forEach((c) => c.end()); server.close(done); server.closeAllConnections?.(); }); },
   };
 }
 

@@ -55,7 +55,7 @@ const getCoreModule = async (path) => WebAssembly.compile(readFileSync(join(dirn
 const wasi = new WASIShim({ sandbox: { preopens: {}, env: {}, args: ["app"], enableNetwork: false } }).getImportObject();
 const imports = {
   ...wasi,
-  ...hostImports({ granted: new Set(granted), origin, dataDir, onLog, hostCall: hasHost ? hostCall : undefined }),
+  ...hostImports({ granted: new Set(granted), origin, dataDir, onLog, hostCall: hasHost ? hostCall : undefined, post: (m) => parentPort.postMessage({ type: "analytics", ...m }) }),
 };
 
 let lifecycle;

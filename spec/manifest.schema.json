@@ -141,20 +141,57 @@
     },
 
     "analytics": {
+      "description": "What the app may send for analytics, to whom, and with which user-controlled safeguards (analytics.md). The host is the only sender: the app cannot choose where events go.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "processors": {
-          "description": "Every endpoint that may receive analytics events. Shown to the user in host settings; events to undeclared endpoints are dropped.",
+          "description": "Every endpoint that may receive events, and for which purposes. Shown to the user by the host. Nothing is ever sent anywhere else.",
           "type": "array",
+          "maxItems": 8,
           "items": {
             "type": "object",
-            "required": ["name", "endpoint"],
+            "required": ["name", "endpoint", "purposes"],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string" },
-              "endpoint": { "type": "string", "pattern": "^https://" },
-              "purpose": { "enum": ["product", "performance", "errors", "advertising", "experiments"] }
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "endpoint": { "description": "https, or http on a loopback name for development.", "type": "string", "pattern": "^(https://|http://(localhost|127\\.0\\.0\\.1|\\[::1\\]|[a-z0-9.-]+\\.localhost)(:[0-9]+)?(/|$))" },
+              "purposes": {
+                "description": "product: events the app emits. performance: timings the host measures. errors: failures the host and app report.",
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "enum": ["product", "performance", "errors"] }
+              }
+            }
+          }
+        },
+        "events": {
+          "description": "The catalog of events the app may emit through analytics.event, with the typed properties each may carry. The host drops any event that is not listed, and any event with a property that is not declared or has the wrong type. Property values must not be personal data.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$" },
+              "description": { "type": "string", "maxLength": 200 },
+              "props": {
+                "type": "object",
+                "maxProperties": 20,
+                "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["type"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": { "enum": ["string", "integer", "number", "boolean"] },
+                    "enum": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "maxLength": 64 } },
+                    "max_length": { "type": "integer", "minimum": 1, "maximum": 200 }
+                  }
+                }
+              }
             }
           }
         }

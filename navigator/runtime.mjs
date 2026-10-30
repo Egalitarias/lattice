@@ -98,7 +98,17 @@ export async function fetchApp(url, { dev = false } = {}) {
     }
     paymentsEndpoint = new URL(declared.pathname, u.origin).href;
   }
-  return { url: u, manifest, wasm, api, tokenEndpoint, paymentsEndpoint };
+
+  // Analytics processors on the app's own origin are reached at the address we fetched from; others as declared.
+  let analyticsProcessors = null;
+  if (manifest.analytics?.processors?.length) {
+    analyticsProcessors = manifest.analytics.processors.map((p) => {
+      const declared = new URL(p.endpoint);
+      const endpoint = declared.hostname === manifest.app ? new URL(declared.pathname + declared.search, u.origin).href : p.endpoint;
+      return { name: p.name, endpoint, purposes: p.purposes };
+    });
+  }
+  return { url: u, manifest, wasm, api, tokenEndpoint, paymentsEndpoint, analyticsProcessors };
 }
 
 async function fetchBlob(origin, hash) {

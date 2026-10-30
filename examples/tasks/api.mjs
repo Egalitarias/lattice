@@ -7,6 +7,7 @@
 import { ApiError } from "../../server/rpc.mjs";
 import { createAuth, defaultOriginAllowed } from "../../server/auth.mjs";
 import { createPayments } from "../../server/payments.mjs";
+import { createCollector } from "../../server/analytics.mjs";
 
 const MAX_TASKS = 50;
 const MAX_TASKS_PRO = 200;
@@ -110,11 +111,20 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
   };
 
   const http = {};
+  // First-party analytics: events arrive from Navigator at the processor endpoint the manifest declares.
+  const collector = createCollector({ log });
+  for (const p of manifest.analytics?.processors ?? []) {
+    if (new URL(p.endpoint).hostname === manifest.app) {
+      const path = new URL(p.endpoint).pathname;
+      http[path] = collector.handler;
+      http[`${path.replace(/\/$/, "")}/summary`] = collector.summaryHandler;
+    }
+  }
   if (manifest.auth?.token_endpoint) http[new URL(manifest.auth.token_endpoint).pathname] = auth.tokenEndpoint;
   if (payments) {
     const base = new URL(manifest.payments.server).pathname.replace(/\/$/, "");
     http[`${base}/sessions`] = payments.sessionsEndpoint;
     http[`${base}/webhook`] = payments.webhookEndpoint;
   }
-  return { handlers, http, auth, payments, pro };
+  return { handlers, http, auth, payments, pro, collector };
 }

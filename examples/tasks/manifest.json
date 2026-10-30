@@ -20,7 +20,8 @@
       "session",
       "auth.oidc",
       "auth.passkey",
-      "payments.request"
+      "payments.request",
+      "analytics.event"
     ]
   },
   "actions": [
@@ -60,5 +61,67 @@
       "domain": "tasks.localhost"
     },
     "server": "https://tasks.localhost/pay"
+  },
+  "analytics": {
+    "processors": [
+      {
+        "name": "Lattice Tasks (first party)",
+        "endpoint": "https://tasks.localhost/events",
+        "purposes": [
+          "product",
+          "performance",
+          "errors"
+        ]
+      }
+    ],
+    "events": [
+      {
+        "name": "task_added",
+        "description": "A task was added",
+        "props": {
+          "tasks": {
+            "type": "integer"
+          }
+        }
+      },
+      {
+        "name": "task_done",
+        "description": "A task was marked done or not done",
+        "props": {
+          "done": {
+            "type": "boolean"
+          }
+        }
+      },
+      {
+        "name": "task_deleted",
+        "description": "A task was deleted"
+      },
+      {
+        "name": "signed_in",
+        "description": "The user signed in",
+        "props": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "passkey",
+              "oidc"
+            ]
+          }
+        }
+      },
+      {
+        "name": "signed_out",
+        "description": "The user signed out"
+      },
+      {
+        "name": "upgrade_started",
+        "description": "The user pressed Upgrade to Pro"
+      },
+      {
+        "name": "upgrade_confirmed",
+        "description": "The server confirmed Pro"
+      }
+    ]
   }
 }

@@ -15,6 +15,7 @@ export const CAPABILITY_IMPORTS = {
   "lattice:app/session": ["session"],
   "lattice:app/auth": ["auth.oidc", "auth.passkey"],
   "lattice:app/payments": ["payments.request"],
+  "lattice:app/analytics": ["analytics.event"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
@@ -25,10 +26,11 @@ export function hostError(tag, val) {
 }
 
 /**
+ * @param post     (message) => void; fire and forget to the main thread (analytics). No reply, so no timing channel.
  * @param hostCall (kind, payload) => { ok, bytes } | { ok: false, error }; blocks until the host answers.
  *                 Provided when the app has an API, a session or auth.
  */
-export function hostImports({ granted, origin, dataDir, onLog, hostCall }) {
+export function hostImports({ granted, origin, dataDir, onLog, hostCall, post }) {
   const imports = {};
 
   imports["lattice:app/log"] = {
@@ -119,6 +121,13 @@ export function hostImports({ granted, origin, dataDir, onLog, hostCall }) {
         need("auth.passkey");
         return unwrap(hostCall("passkey", { flow: "assert", options }));
       },
+    };
+  }
+
+  if (post && granted.has("analytics.event")) {
+    imports["lattice:app/analytics"] = {
+      emit: (name, props) => post({ op: "emit", name, props }),
+      reportError: (name, detail) => post({ op: "report-error", name, detail }),
     };
   }
 

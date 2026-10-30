@@ -30,7 +30,7 @@ export const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
 
 // ---- A complete stack: dev IdP + tasks origin + Navigator ---------------------------------------
 
-export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, pspOptions = {} } = {}) {
+export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, pspOptions = {}, analyticsOptions } = {}) {
   const idp = await startIdp({ clientSecret });
   const psp = wantPsp ? await startPsp(pspOptions) : null;
   const app = await loadApp({
@@ -47,7 +47,7 @@ export async function withStack(fn, { requires, clientSecret, authTimeoutMs, wat
   const dir = mkdtempSync(join(tmpdir(), "nav-auth-"));
   let nav;
   try {
-    nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet, authTimeoutMs, watchdogMs });
+    nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `http://127.0.0.1:${originPort}/`, dev: true, port: 0, dataDir: dir, log: quiet, authTimeoutMs, watchdogMs, analyticsOptions });
   } catch (e) {
     // Navigator refused to start (for example, the component could not be linked): close what we opened.
     await close(origin);
@@ -67,7 +67,7 @@ export async function withStack(fn, { requires, clientSecret, authTimeoutMs, wat
 
   const h = {
     nav, idp, psp, app, originPort, dir, state, call,
-    payments: app.impl?.payments, pro: app.impl?.pro,
+    payments: app.impl?.payments, pro: app.impl?.pro, collector: app.impl?.collector,
     act: (source, values = {}, event = "press") => call("/_navigator/act", { source, event, values }),
     button: async (text) => find((await state()).tree, (n) => n.type === "button" && n.props.text === text),
     tasks: async () => all((await state()).tree, (n) => n.type === "checkbox").map((n) => n.props.label),

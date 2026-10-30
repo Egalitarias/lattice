@@ -131,13 +131,23 @@ interface payments {
     request: func(order-ref: string) -> result<payment-receipt, host-error>;
 }
 
-/// Capability: analytics.event
+/// Capability: analytics.event (see spec/analytics.md)
 interface analytics {
     use types.{args};
 
-    /// Delivered to the endpoints declared in manifest `analytics.processors`, subject to the
-    /// user's global analytics level. Never include values from `sensitive` inputs.
+    /// Record a product event. Fire and forget: there is no result and no error, so an app cannot
+    /// tell whether anything was sent, and cannot be slowed by it. `name` and `props` are checked
+    /// against the catalog in manifest `analytics.events`; an event that is not declared, or has an
+    /// undeclared or mistyped property, is dropped whole. What is actually sent depends on the user's
+    /// analytics level and on the processors the manifest declares; the host does the sending, and
+    /// scrubs anything that matches a value the user typed into a `sensitive` input.
     emit: func(name: string, props: args);
+
+    /// Report a failure the app handled or noticed. `name` is a short stable identifier
+    /// ("payment_confirm_failed"); `detail` is free text for developers and is scrubbed of emails,
+    /// long numbers and tokens and truncated to 200 characters. Sent only at the "errors" level or above,
+    /// to processors declared for `errors`. Fire and forget.
+    report-error: func(name: string, detail: string);
 }
 
 /// Capability: notifications
