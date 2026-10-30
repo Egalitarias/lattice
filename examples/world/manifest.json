@@ -1,0 +1,28 @@
+{
+  "lattice": "0.1",
+  "app": "world.localhost",
+  "name": "Lattice World",
+  "description": "Reference app: a small shared grid where everyone online is shown moving live, using server push (topics).",
+  "version": "0.1.0",
+  "lang": "en",
+  "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": { "/": "Home" },
+  "api": {
+    "url": "https://world.localhost/rpc",
+    "schema": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "capabilities": { "requires": ["net.origin", "net.realtime", "session"] },
+  "actions": [
+    {
+      "name": "move",
+      "description": "Move one step.",
+      "effect": "write",
+      "input": {
+        "type": "object",
+        "properties": { "dx": { "type": "integer" }, "dy": { "type": "integer" } },
+        "required": ["dx", "dy"]
+      }
+    }
+  ],
+  "fallback": { "html": "/" }
+}

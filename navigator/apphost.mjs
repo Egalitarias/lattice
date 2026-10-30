@@ -32,6 +32,7 @@ export class AppHost {
    * @param opts.component   what the thread needs to load the transpiled component (opaque to this class)
    * @param opts.granted     capability names the manifest grants
    * @param opts.rpc         RpcClient, or null if the app has no API
+   * @param opts.stream      StreamClient, or null (topics need `net.realtime`)
    * @param opts.session     SessionStore, or null
    * @param opts.auth        AuthBroker, or null
    * @param opts.payments    PaymentBroker, or null
@@ -40,8 +41,8 @@ export class AppHost {
    * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
    *                         on a host call (the network, a person) does not count.
    */
-  constructor({ spawn, component, granted, rpc = null, session = null, auth = null, payments = null, analytics = null, storage = null, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { spawn, component, granted: [...granted], rpc, session, auth, payments, analytics, storage, onLog, watchdogMs, debug });
+  constructor({ spawn, component, granted, rpc = null, stream = null, session = null, auth = null, payments = null, analytics = null, storage = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { spawn, component, granted: [...granted], rpc, stream, session, auth, payments, analytics, storage, onLog, watchdogMs, debug });
   }
 
   async start() {
@@ -49,7 +50,7 @@ export class AppHost {
       component: this.component,
       granted: this.granted,
       sab: this.#sab,
-      hasHost: !!(this.rpc || this.session || this.auth || this.payments || this.storage),
+      hasHost: !!(this.rpc || this.stream || this.session || this.auth || this.payments || this.storage),
       debug: this.debug,
     });
     this.#worker = worker;
@@ -147,6 +148,11 @@ export class AppHost {
     switch (m.kind) {
       case "rpc":
         return this.rpc ? this.rpc.call(m.method, m.request) : denied("net.origin");
+      case "subscribe":
+        return this.stream ? this.stream.subscribe(m.topic) : denied("net.realtime");
+      case "unsubscribe":
+        this.stream?.unsubscribe(m.topic);
+        return { ok: true, bytes: new Uint8Array() };
       case "session-current":
         return this.session ? { ok: true, bytes: jsonBytes(info(this.session.info())) } : denied("session");
       case "session-sign-out":
@@ -207,12 +213,20 @@ export class AppHost {
   }
 
   kill() {
+    this.stream?.reset();
     const w = this.#worker;
     this.#worker = null;
     w?.terminate();
   }
 
+  /** Stop for good: unlike kill(), nothing (a call that finds the component gone, a crash handler) may start it again. */
+  close() {
+    this.closed = true;
+    this.kill();
+  }
+
   async restart() {
+    if (this.closed) throw new HostCrash("the app was closed");
     this.kill();
     await this.start();
   }

@@ -1,0 +1,19 @@
+[package]
+name = "world"
+version = "0.1.0"
+edition = "2021"
+description = "Lattice reference app: a shared grid whose players move live, using server push."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

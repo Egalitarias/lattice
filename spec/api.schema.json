@@ -16,6 +16,13 @@
       "maxProperties": 256,
       "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
       "additionalProperties": { "$ref": "#/$defs/method" }
+    },
+    "topics": {
+      "description": "Server push (see rpc.md, Topics). Each topic is a stream of messages from the server, all of one schema. The app subscribes by name through the host.",
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+      "additionalProperties": { "$ref": "#/$defs/topic" }
     }
   },
   "$defs": {
@@ -46,6 +53,15 @@
             }
           }
         }
+      }
+    },
+    "topic": {
+      "type": "object",
+      "required": ["message"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string", "maxLength": 300 },
+        "message": { "description": "Schema of every message on this topic. The host validates each one before the app sees it.", "$ref": "#/$defs/bodySchema" }
       }
     },
     "bodySchema": {

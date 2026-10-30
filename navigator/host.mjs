@@ -71,10 +71,13 @@ export function hostImports({ granted, onLog, hostCall, post }) {
   if (hostCall && ["net.origin", "net.realtime"].some((c) => granted.has(c))) {
     imports["lattice:app/rpc"] = {
       call: (method, request) => unwrap(hostCall("rpc", { method, request })),
-      subscribe() {
-        throw hostError("unavailable", "streaming is not implemented in this Lattice Navigator");
+      subscribe(topic) {
+        need("net.realtime");
+        unwrap(hostCall("subscribe", { topic }));
       },
-      unsubscribe() {},
+      unsubscribe(topic) {
+        if (granted.has("net.realtime")) unwrap(hostCall("unsubscribe", { topic }));
+      },
     };
   }
 

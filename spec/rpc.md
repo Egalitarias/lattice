@@ -76,9 +76,33 @@ declared for that method is treated as a protocol violation (`transport`), not p
 | Capability not granted | the import is not linked at all, so the component fails to instantiate |
 | Timeout, connection failure, oversize or malformed response, schema or protocol violation | `transport(message)` |
 
+## Topics (server push)
+
+An API description may declare `topics`. Each is a named stream of messages from the server, every message matching
+the topic's `message` schema. The app calls `rpc.subscribe(topic)` (capability `net.realtime`) and receives
+`host-event.stream-message { topic, payload }` through `on-event`; `rpc.unsubscribe(topic)` stops it.
+
+**Wire (v0.1, streaming HTTPS):** `GET {api.url}/_topics/{topic}` with the same `Lattice-Api` and `Lattice-Session`
+headers as a call. A `200` has `Content-Type: application/x-ndjson`; the body is one JSON object per line,
+`{"seq": <integer>, "payload": <message>}`, with an empty line as a heartbeat (about every 15 s). Errors before the
+stream starts use the RPC error body. Only the JSON data model is carried, as for calls. This framing is
+transport-neutral: a WebTransport stream carrying the same lines is the intended upgrade, advertised by
+`api.stream`; it is not implemented.
+
+**Host duties.** The host refuses topics the description does not declare, allows at most 8 subscriptions per app,
+validates each message (dropping and counting any that fail), caps a line at 1 MiB, re-connects with exponential
+back-off (1 s to 30 s) and does not retry after a `4xx` other than `408`/`429`. It delivers messages to the app one
+at a time, in order, and when the app falls behind drops the oldest beyond 64 queued: push is for state, not for
+commands. After a reconnect the server sends whatever snapshot it chooses first, so a message may be repeated and
+the app must treat messages as state, not as events to be counted.
+
+**Server duties.** Authorise by session before the stream starts (an `ApiError` becomes the error response),
+validate every published message against the schema, and drop a subscriber that cannot keep up (more than 256 KiB
+queued). A message goes only to subscribers allowed to see it.
+
 ## Not specified yet
 
-- Streaming and server push (`rpc.subscribe`, WebTransport).
+- WebTransport (datagrams, multiple streams), resumable streams, and per-topic parameters.
 - Cross-origin API endpoints and their capability.
 - Byte strings and non-string keys in bodies (the validated data model is JSON).
 - Compression, request batching, and pagination conventions.

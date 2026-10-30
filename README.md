@@ -128,6 +128,19 @@ cd navigator && node test/payments-browser-check.mjs                  # a full p
 cd navigator && node test/analytics-browser-check.mjs                 # the Privacy control in Edge/Chrome
 ```
 
+### Live updates
+
+`examples/world` is a shared grid where every connected player moves live: the server publishes the picture on a
+`world` topic and each Navigator hands it to the component. Build it like the others, then open it in two browsers
+(different profiles, so different sessions):
+
+```
+cd examples/world && cargo build --release --target wasm32-wasip2 && cd ../..
+cd server && node server.mjs --app ../examples/world --port 8081 --dev     # open http://world.localhost:8081/
+```
+
+`node test/world-browser-check.mjs` drives two real browsers through it.
+
 ### Browser mode
 
 ```
@@ -162,8 +175,11 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   Not specified: experiments / A/B assignment, session replay, consent flows, per-purpose levels, retention. Redaction
   catches values the user typed into sensitive inputs and common personal-data patterns in error text; it cannot catch
   data the app has transformed. The processor's server necessarily sees the user's IP address.
-- RPC: no streaming, no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps
-  state in memory.
+- RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps state in memory.
+- Server push: declared `topics` delivered as newline-delimited JSON over a streaming HTTPS response (`spec/rpc.md`,
+  "Topics"), validated by the host, bounded and re-connecting. Real WebTransport (HTTP/3, datagrams) is not implemented:
+  Node 22 has no HTTP/3 server, so the framing is kept transport-neutral for it. No resumable streams: a reconnect gets
+  a fresh snapshot from the server, so topics should carry state, not commands.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
   differs from the address fetched.
 - Renderer gaps: `layer` constraints, `canvas`, `media` with hashed sources, `ad-slot` and `embed` are placeholders.
@@ -182,7 +198,8 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
 6d. [ ] A host-drawn payment sheet, experiments
-7. [ ] A 2D multiplayer world (WebTransport + canvas)
+7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
+7b. [ ] WebTransport as a second transport, and a canvas-drawn 2D world
 
 ## License
 

@@ -30,6 +30,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { encode } from "../shared/cbor.mjs";
 import { createRpc } from "./rpc.mjs";
+import { createTopics } from "./topics.mjs";
 
 export const MANIFEST_TYPE = "application/vnd.lattice.app+cbor";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -126,6 +127,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   let rpc = null;
+  let topics = null;
   let rpcPath = null;
   let http = {};
   let impl = null;
@@ -140,7 +142,9 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
     manifest.api = { ...manifest.api, schema: apiHash };
     rpcPath = new URL(manifest.api.url).pathname.replace(/\/$/, "");
     const mod = await import(pathToFileURL(join(appDir, "api.mjs")).href);
-    impl = mod.setup ? await mod.setup({ manifest, oidc, dev, stripe, log }) : { handlers: mod.handlers, http: mod.http };
+    // Topics exist before setup, so handlers can publish to them; who may subscribe is decided by impl.authorizeTopic.
+    topics = createTopics({ apiDescription, apiHash, authorize: (topic, ctx) => impl?.authorizeTopic?.(topic, ctx), log });
+    impl = mod.setup ? await mod.setup({ manifest, oidc, dev, stripe, log, topics }) : { handlers: mod.handlers, http: mod.http };
     http = impl.http ?? {};
     rpc = createRpc({ apiDescription, apiHash, handlers: impl.handlers, log });
   } else if (manifest.api) {
@@ -148,7 +152,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath, http, impl, dev };
+  return { manifest, blobs, rpc, rpcPath, http, impl, dev, topics };
 }
 
 const FALLBACK = (name) => `<!doctype html>
@@ -159,7 +163,7 @@ const FALLBACK = (name) => `<!doctype html>
 <code>Accept: ${MANIFEST_TYPE}</code>.</p>
 `;
 
-export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {}, navigator = null, dev = false }) {
+export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {}, navigator = null, dev = false, topics = null }) {
   const cbor = Buffer.from(encode(manifest));
   return http.createServer((req, res) => {
     const url = new URL(req.url, "http://placeholder");
@@ -187,6 +191,11 @@ export function createServer({ manifest, blobs, rpc, rpcPath, http: routes = {},
     if (Object.hasOwn(routes, url.pathname)) {
       res.setHeader("Cache-Control", "no-store");
       return void routes[url.pathname](req, res);
+    }
+
+    if (topics && url.pathname.startsWith(`${rpcPath}/_topics/`)) {
+      res.setHeader("Cache-Control", "no-store");
+      return void topics.handle(req, res, url.pathname.slice(rpcPath.length + 9));
     }
 
     if (rpc && url.pathname.startsWith(rpcPath + "/")) {

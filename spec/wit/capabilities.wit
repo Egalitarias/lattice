@@ -35,7 +35,9 @@ interface rpc {
     /// caller's turn until the server answers or the host's timeout (10 s) expires.
     call: func(method: string, request: list<u8>) -> result<list<u8>, rpc-error>;
 
-    /// Capability: net.realtime. Delivers `host-event.stream-message` for `topic`.
+    /// Capability: net.realtime. Delivers `host-event.stream-message` for `topic`, which the API description must declare
+    /// (see rpc.md, Topics). Fails with `invalid-argument` for an undeclared topic and `rate-limited` past 8 subscriptions.
+    /// The first message is normally the server's current snapshot.
     subscribe: func(topic: string) -> result<_, host-error>;
 
     unsubscribe: func(topic: string);

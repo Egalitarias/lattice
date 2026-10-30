@@ -4,6 +4,7 @@
 import { SceneStore, SceneError, toArgs } from "./scene.mjs";
 import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
 import { RpcClient, SessionStore } from "./rpc.mjs";
+import { StreamClient } from "./stream.mjs";
 import { AuthBroker } from "./auth.mjs";
 import { PaymentBroker } from "./payments.mjs";
 import { Prompts } from "./prompts.mjs";
@@ -112,6 +113,7 @@ export class Session {
 
   /** The worker was killed or died: start a fresh instance and show the current page again. */
   async #recover() {
+    if (this.host.closed) return;
     try {
       await this.host.restart();
       await this.#init();
@@ -237,6 +239,7 @@ export class Session {
 // process puts an HTTP server in front of it; a browser calls it directly. Same logic, same checks.
 
 const defaultLogger = () => {};
+const MAX_PUSHED_QUEUE = 64;
 
 export class Controller {
   #listeners = new Set();
@@ -249,8 +252,8 @@ export class Controller {
    * @param component     what the thread needs to load the transpiled component
    * @param uiOrigin      () => the origin the user's window is on (redirect URIs are built from it)
    */
-  constructor({ app, kv, spawn, component, uiOrigin, dev = false, log = defaultLogger, watchdogMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {}, fetchImpl }) {
-    Object.assign(this, { app, kv, spawn, component, uiOrigin, dev, log, watchdogMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions, fetchImpl });
+  constructor({ app, kv, spawn, component, uiOrigin, dev = false, log = defaultLogger, watchdogMs, streamBackoffMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions = {}, fetchImpl }) {
+    Object.assign(this, { app, kv, spawn, component, uiOrigin, dev, log, watchdogMs, streamBackoffMs, rpcTimeoutMs, authTimeoutMs, analyticsOptions, fetchImpl });
     this.manifest = app.manifest;
     this.domain = app.manifest.app;
   }
@@ -260,6 +263,9 @@ export class Controller {
     this.#listeners.add(fn);
     return () => this.#listeners.delete(fn);
   }
+
+  #pushQueue = [];
+  #pushing = false;
 
   #emit(msg) {
     for (const fn of this.#listeners) {
@@ -300,6 +306,20 @@ export class Controller {
       }
     }
 
+    // Server push: only for an app that holds net.realtime and whose API description declares topics.
+    const stream = rpc && granted.has("net.realtime") && api.description.topics
+      ? new StreamClient({
+          endpoint: api.endpoint,
+          description: api.description,
+          apiHash: api.hash,
+          session: granted.has("session") ? this.sessionStore : null,
+          onMessage: (topic, payload) => this.#pushed(topic, payload),
+          onProblem: (topic, why) => log("warn", `topic ${topic}: ${why}`),
+          backoffMs: this.streamBackoffMs,
+          ...fetchOpt,
+        })
+      : null;
+
     // Analytics policy lives in the manifest; the user's level lives in this profile. Without declared
     // processors there is nothing to configure and nothing is ever sent.
     this.analytics = analyticsProcessors ? new Analytics({ manifest, processors: analyticsProcessors, kv, dev, log, ...this.analyticsOptions }) : null;
@@ -309,6 +329,7 @@ export class Controller {
       component: this.component,
       granted,
       rpc,
+      stream,
       session: granted.has("session") ? this.sessionStore : null,
       auth: this.auth,
       payments: this.payments,
@@ -457,9 +478,37 @@ export class Controller {
     return this.payments ? this.payments.callback(outcome, params) : { ok: false, message: "Payments are not available." };
   }
 
+  /**
+   * A validated message arrived on a topic. Messages reach the app one at a time and in order. If the app falls behind,
+   * the oldest beyond MAX_PUSHED_QUEUE are dropped: topics carry state, not commands.
+   */
+  #pushed(topic, payload) {
+    this.#pushQueue.push({ topic, payload });
+    if (this.#pushQueue.length > MAX_PUSHED_QUEUE) this.#pushQueue.shift();
+    if (this.#pushing) return;
+    this.#pushing = true;
+    void (async () => {
+      try {
+        while (this.#pushQueue.length && this.session) {
+          const { topic, payload } = this.#pushQueue.shift();
+          try {
+            const { focus } = await this.session.event({ tag: "stream-message", val: { topic, payload } });
+            this.#emit(this.snap(focus));
+          } catch (e) {
+            this.log("warn", `push on ${topic} failed: ${e.message}`);
+          }
+        }
+      } finally {
+        this.#pushing = false;
+      }
+    })();
+  }
+
   async close() {
+    this.#pushQueue.length = 0;
+    this.host?.stream?.close();
     await this.analytics?.close();
     this.prompts?.dispose();
-    this.host?.kill();
+    this.host?.close();
   }
 }

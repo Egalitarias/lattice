@@ -1,0 +1,66 @@
+{
+  "lattice-api": "0.1",
+  "title": "World API",
+  "version": "1.0.0",
+  "methods": {
+    "join": {
+      "description": "Enter the world (or return to it). The server names you and picks your starting cell.",
+      "request": { "type": "object", "additionalProperties": false },
+      "response": {
+        "type": "object",
+        "required": ["id", "width", "height"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "width": { "type": "integer", "minimum": 1, "maximum": 24 },
+          "height": { "type": "integer", "minimum": 1, "maximum": 24 }
+        }
+      }
+    },
+    "move": {
+      "description": "Take one step. Anything beyond the edge is ignored.",
+      "request": {
+        "type": "object",
+        "required": ["dx", "dy"],
+        "additionalProperties": false,
+        "properties": {
+          "dx": { "type": "integer", "minimum": -1, "maximum": 1 },
+          "dy": { "type": "integer", "minimum": -1, "maximum": 1 }
+        }
+      },
+      "response": { "type": "object", "additionalProperties": false }
+    },
+    "leave": {
+      "description": "Leave the world.",
+      "request": { "type": "object", "additionalProperties": false },
+      "response": { "type": "object", "additionalProperties": false }
+    }
+  },
+  "topics": {
+    "world": {
+      "description": "Everyone who is in the world, and where. Each message is the whole picture, so a missed one is repaired by the next.",
+      "message": {
+        "type": "object",
+        "required": ["players"],
+        "additionalProperties": false,
+        "properties": {
+          "players": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "x", "y"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "integer", "minimum": 1 },
+                "name": { "type": "string", "maxLength": 24 },
+                "x": { "type": "integer", "minimum": 0, "maximum": 23 },
+                "y": { "type": "integer", "minimum": 0, "maximum": 23 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

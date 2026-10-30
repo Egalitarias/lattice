@@ -70,7 +70,7 @@
       "properties": {
         "url": { "type": "string", "format": "uri", "pattern": "^https://" },
         "schema": { "description": "Hash of the API description (api.schema.json), fetched from /.lattice/blob/{hash}. See rpc.md.", "$ref": "#/$defs/hash" },
-        "stream": { "description": "Optional WebTransport endpoint for server push / real time.", "type": "string", "pattern": "^https://" }
+        "stream": { "description": "Reserved for a WebTransport endpoint carrying the same topics as {api.url}/_topics/{topic} (see rpc.md). Not used by v0.1 hosts.", "type": "string", "pattern": "^https://" }
       }
     },
 
