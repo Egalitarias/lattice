@@ -15,6 +15,7 @@ export const CAPABILITY_IMPORTS = {
   "lattice:app/auth": ["auth.oidc", "auth.passkey"],
   "lattice:app/payments": ["payments.request"],
   "lattice:app/analytics": ["analytics.event"],
+  "lattice:app/experiments": ["experiments"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
@@ -109,6 +110,12 @@ export function hostImports({ granted, onLog, hostCall, post }) {
     imports["lattice:app/analytics"] = {
       emit: (name, props) => post({ op: "emit", name, props }),
       reportError: (name, detail) => post({ op: "report-error", name, detail }),
+    };
+  }
+
+  if (hostCall && granted.has("experiments")) {
+    imports["lattice:app/experiments"] = {
+      lookup: (name) => fromUtf8(unwrap(hostCall("experiment", { name }))),
     };
   }
 

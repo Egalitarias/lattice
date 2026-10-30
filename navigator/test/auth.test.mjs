@@ -155,7 +155,7 @@ test("capabilities: oidc is refused when the manifest grants only passkeys", asy
     assert.equal(r.status, 422);
     assert.match(r.body.error, /Not permitted: auth\.oidc/);
     assert.equal((await h.state()).chrome.prompts.length, 0);
-  }, { requires: ["net.origin", "session", "auth.passkey", "payments.request", "analytics.event"] });
+  }, { requires: ["net.origin", "session", "auth.passkey", "payments.request", "analytics.event", "experiments"] });
 });
 
 test("the watchdog does not kill a component that is waiting on the user", async () => {

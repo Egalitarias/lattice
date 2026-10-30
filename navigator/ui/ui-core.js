@@ -418,6 +418,27 @@ function privacyEl(p) {
   return d;
 }
 
+// ---- Experiments -------------------------------------------------------------------------------
+// What the app is testing on this user, and the way out. Text comes from the manifest and the host's own record.
+
+let experimentsOpen = false;
+
+function experimentsEl(x) {
+  const d = h("details", { class: "privacy experiments" });
+  d.open = experimentsOpen;
+  d.addEventListener("toggle", () => (experimentsOpen = d.open));
+  d.append(h("summary", {}, `Experiments: ${x.optOut ? "not taking part" : "taking part"}`));
+  const box = h("input", { type: "checkbox", id: "experiments-optin" });
+  box.checked = !x.optOut;
+  box.addEventListener("change", () => post("experiments", { optOut: !box.checked }));
+  d.append(h("div", { class: "field" }, box, h("label", { for: "experiments-optin" }, "Take part in this app's experiments")));
+  d.append(h("p", {}, x.optOut ? "You see the standard version of everything." : "This app compares versions of itself. You are in:"));
+  const ul = h("ul", {});
+  for (const e of x.list) ul.append(h("li", {}, `${e.name}: ${e.yours ?? "not yet assigned"}${e.description ? ` \u2014 ${e.description}` : ""}`));
+  d.append(ul);
+  return d;
+}
+
 function renderChrome(c) {
   if (!c) return;
   const parts = [h("strong", {}, c.app.domain)];
@@ -430,6 +451,7 @@ function renderChrome(c) {
     }
   }
   if (c.privacy) parts.push(privacyEl(c.privacy));
+  if (c.experiments) parts.push(experimentsEl(c.experiments));
   chromeEl.replaceChildren(...parts);
   chromeEl.hidden = false;
   // A window that connects mid-flow still shows the pending prompt.

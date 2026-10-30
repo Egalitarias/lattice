@@ -9,6 +9,7 @@
 | [`auth.md`](auth.md) | Authentication: sessions, `Lattice-Set-Session`, OIDC, passkeys, what the host and server each verify |
 | [`payments.md`](payments.md) | Payments: hosted checkout, who states the price, webhooks as the source of truth |
 | [`browser.md`](browser.md) | Browser Navigator: the host served by the app's own origin, required headers, trust trade-off |
+| [`experiments.md`](experiments.md) | A/B experiments: host-side assignment with no identifier, exposure events, user opt-out |
 | [`analytics.md`](analytics.md) | Analytics and error reporting: user levels, declared event catalog, redaction, delivery |
 | [`wit/`](wit/README.md) | Component interface (WIT): how an app and Lattice Navigator talk, and capabilities as imports |
 

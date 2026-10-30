@@ -141,6 +141,35 @@
       }
     },
 
+    "experiments": {
+      "description": "A/B experiments the host may assign (experiments.md). The first variant of each is the control.",
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["name", "variants"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$" },
+          "description": { "description": "Shown to the user in the host's experiments panel.", "type": "string", "maxLength": 200 },
+          "variants": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "required": ["name", "weight"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+                "weight": { "type": "integer", "minimum": 1, "maximum": 100 }
+              }
+            }
+          }
+        }
+      }
+    },
+
     "analytics": {
       "description": "What the app may send for analytics, to whom, and with which user-controlled safeguards (analytics.md). The host is the only sender: the app cannot choose where events go.",
       "type": "object",

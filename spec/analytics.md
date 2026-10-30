@@ -71,6 +71,7 @@ These need no `analytics.event` capability and no catalog entry, but still need 
 | performance | `host.action` | `action` (the action name), `ms` |
 | error | `app.internal` | `detail` (scrubbed) |
 | error | `app.reported` | `name`, `detail` (scrubbed), from `analytics.report-error` |
+| product | `host.experiment` | `experiment`, `variant` (an exposure; see `experiments.md`) |
 | error | `host.crash` | `detail` (the component stopped responding or crashed, and was restarted) |
 | error | `host.invalid_scene` | `detail` (the app returned a scene or update the host rejected) |
 
@@ -117,7 +118,7 @@ properties. At `full`, a button resets the client id.
 
 ## Not specified yet
 
-- Experiments and A/B assignment (`experiments`), and the exposure events they would imply
+- Statistics on experiment results (assignment and exposure events are specified in `experiments.md`)
 - Session replay or heatmaps (the scene tree makes a privacy-preserving version possible; none is specified)
 - Consent flows tied to `consent`, and per-purpose levels
 - Server-side retention and deletion of what processors received

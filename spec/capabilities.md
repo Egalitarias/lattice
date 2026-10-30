@@ -43,7 +43,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 | `payments.mandate` | Recurring-payment consent, visible and revocable in host settings | host UI | each time |
 | `ads.slot` | Allows `AdSlot` nodes to be filled by the host | host UI | none (user sets global ad level) |
 | `analytics.event` | Record events from the manifest's declared catalog and report errors. The host validates, redacts, applies the user's level, and is the only sender (`analytics.md`) | data | none (user sets the level) |
-| `experiments` | Variant assignment and exposure logging | data | none |
+| `experiments` | Variant assignment and exposure logging (`experiments.md`) | data | none (the user can opt out) |
 
 ## Device and platform
 

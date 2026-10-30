@@ -21,7 +21,8 @@
       "auth.oidc",
       "auth.passkey",
       "payments.request",
-      "analytics.event"
+      "analytics.event",
+      "experiments"
     ]
   },
   "actions": [
@@ -123,5 +124,21 @@
         "description": "The server confirmed Pro"
       }
     ]
-  }
+  },
+  "experiments": [
+    {
+      "name": "upgrade_pitch",
+      "description": "Whether a one-line pitch is shown above the Upgrade button.",
+      "variants": [
+        {
+          "name": "control",
+          "weight": 50
+        },
+        {
+          "name": "benefit",
+          "weight": 50
+        }
+      ]
+    }
+  ]
 }

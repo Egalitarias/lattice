@@ -9,6 +9,7 @@ import { AuthBroker } from "./auth.mjs";
 import { PaymentBroker } from "./payments.mjs";
 import { Prompts } from "./prompts.mjs";
 import { Analytics } from "./analytics.mjs";
+import { Experiments } from "./experiments.mjs";
 import { AppStorage } from "./storage.mjs";
 import { CAPABILITY_IMPORTS } from "./host.mjs";
 import { LoadError } from "./runtime.mjs";
@@ -349,6 +350,8 @@ export class Controller {
     // processors there is nothing to configure and nothing is ever sent.
     this.analytics = analyticsProcessors ? new Analytics({ manifest, processors: analyticsProcessors, kv, dev, log, ...this.analyticsOptions }) : null;
 
+    this.experiments = granted.has("experiments") && manifest.experiments?.length ? new Experiments({ manifest, kv, domain, analytics: this.analytics }) : null;
+
     this.host = new AppHost({
       spawn: this.spawn,
       component: this.component,
@@ -359,6 +362,7 @@ export class Controller {
       auth: this.auth,
       payments: this.payments,
       analytics: this.analytics,
+      experiments: this.experiments,
       storage: ["storage.local", "storage.sync"].some((c) => granted.has(c)) ? new AppStorage(kv, domain) : null,
       onLog: log,
       watchdogMs: this.watchdogMs,
@@ -395,6 +399,7 @@ export class Controller {
       session: i ? { signedIn: i.signedIn, name: i.name ?? null } : null,
       prompts: this.prompts.list(),
       privacy: this.analytics ? this.analytics.snapshot() : null,
+      experiments: this.experiments ? this.experiments.snapshot() : null,
     };
   }
 
@@ -479,6 +484,14 @@ export class Controller {
         } catch {
           throw new HttpError(400, "unknown analytics level");
         }
+        this.#emit({ kind: "chrome", chrome: this.chrome() });
+        return;
+
+      // The user's choice to take part in the app's experiments, or be in the control of each.
+      case "experiments":
+        if (!this.experiments) throw new HttpError(404, "no such endpoint");
+        if (typeof body.optOut !== "boolean") throw new HttpError(400, "bad value");
+        this.experiments.setOptOut(body.optOut);
         this.#emit({ kind: "chrome", chrome: this.chrome() });
         return;
 

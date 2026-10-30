@@ -43,6 +43,17 @@ interface rpc {
     unsubscribe: func(topic: string);
 }
 
+/// Capability: experiments
+interface experiments {
+    use types.{host-error};
+
+    /// The variant of the named experiment (declared in manifest `experiments`) that this user is in. The host assigned
+    /// it once, at random, and remembers it on this device; a user who opted out is always in the first (control)
+    /// variant. Looking a variant up records an exposure, which analytics sends only as the user's level allows.
+    /// Fails with `invalid-argument` for an experiment the manifest does not declare.
+    lookup: func(name: string) -> result<string, host-error>;
+}
+
 /// Capability: storage.local (and storage.sync, which replicates the same namespace)
 interface storage {
     use types.{host-error};

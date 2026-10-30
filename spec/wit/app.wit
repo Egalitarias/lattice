@@ -116,6 +116,7 @@ world app {
     import auth;
     import payments;
     import analytics;
+    import experiments;
     import notifications;
     import consent;
 

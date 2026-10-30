@@ -218,7 +218,8 @@ export class Analytics {
   /** An event the host itself generates (timings, failures). Not in the catalog; shaped here, not by the app. */
   host(kind, name, props = {}) {
     try {
-      if (kind !== "performance" && kind !== "error") return;
+      // The host also records experiment exposures, as product events, without the app having a say in them.
+      if (kind !== "performance" && kind !== "error" && !(kind === "product" && name === "host.experiment")) return;
       const clean = {};
       for (const [k, v] of Object.entries(props)) {
         if (k === "ms") clean.ms = Math.max(0, Math.round(Number(v) / 10) * 10);

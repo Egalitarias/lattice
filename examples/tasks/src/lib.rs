@@ -20,6 +20,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use exports::lattice::app::lifecycle::{ActionCall, Guest, HostEvent, Launch, RouteRequest};
 use lattice::app::analytics;
 use lattice::app::auth;
+use lattice::app::experiments;
 use lattice::app::log::{self, Level};
 use lattice::app::payments;
 use lattice::app::rpc::{self, RpcError};
@@ -53,6 +54,7 @@ const ACC_PENDING: NodeId = 37;
 const ACC_CHECK: NodeId = 38;
 const ACC_NOTE: NodeId = 39;
 const ACC_OIDC_BASE: NodeId = 40;
+const ACC_PITCH: NodeId = 48;
 // Task `n` occupies ids ROW_BASE + n*4 .. +2 (row, checkbox, delete button).
 const ROW_BASE: NodeId = 1000;
 
@@ -288,6 +290,11 @@ fn account_nodes() -> Vec<Node> {
                 kids.push(ACC_PENDING);
                 kids.push(ACC_CHECK);
             } else if !s.pro {
+                // An experiment (manifest `experiments`): does a one-line pitch change how often people upgrade? The host
+                // chose the variant, at random and once; this code only reads it and records nothing about it.
+                if experiments::lookup("upgrade_pitch").map(|v| v == "benefit").unwrap_or(false) {
+                    kids.push(ACC_PITCH);
+                }
                 kids.push(ACC_UPGRADE);
             }
             kids.push(ACC_SIGN_OUT);
@@ -295,6 +302,9 @@ fn account_nodes() -> Vec<Node> {
             nodes.push(node(ACC_STATUS, text(&status), &[]));
             if let Some(n) = &s.note {
                 nodes.push(node(ACC_NOTE, text(n), &[]));
+            }
+            if kids.contains(&ACC_PITCH) {
+                nodes.push(node(ACC_PITCH, text("Pro raises the limit from 50 tasks to 200."), &[]));
             }
             if s.pending_order.is_some() {
                 nodes.push(node(ACC_PENDING, text("Payment submitted. Waiting for the server to confirm it."), &[]));
