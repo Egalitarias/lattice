@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Schema validation for the Lattice specification",
+  "license": "Apache-2.0",
   "scripts": {
     "validate": "node validate.mjs && node check-wit.mjs && npm run wit",
     "wit": "jco types wit --world-name app -o .wit-out && jco types wit --world-name embed -o .wit-out-embed"

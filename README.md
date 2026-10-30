@@ -119,6 +119,13 @@ cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Ed
 6. [ ] Auth (OIDC + passkeys), then payments (Stripe Checkout), then analytics
 7. [ ] A 2D multiplayer world (WebTransport + canvas)
 
+## License
+
+Copyright 2026 Gary Davies. Licensed under the [Apache License, Version 2.0](LICENSE). Unless you state otherwise,
+any contribution you submit for inclusion is licensed under the same terms, with no additional conditions.
+
+As stated in Section 6 of the License, it does not grant permission to use the names "Lattice" or "Lattice Navigator" as trademarks.
+
 ## Open problems
 
 Discoverability/SEO, text and IME in a non-DOM renderer, WASM startup size,

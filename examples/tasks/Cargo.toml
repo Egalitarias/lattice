@@ -3,6 +3,7 @@ name = "tasks"
 version = "0.1.0"
 edition = "2021"
 description = "Lattice reference app: a todo list whose state lives on the server, reached over typed RPC."
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]

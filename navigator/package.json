@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Lattice Navigator: prototype Lattice host. Fetches a manifest, verifies and runs the WASM component, and serves a semantic UI projection of its scene tree.",
+  "license": "Apache-2.0",
   "scripts": {
     "start": "node navigator.mjs",
     "test": "node --test test/e2e.test.mjs test/rpc.test.mjs"

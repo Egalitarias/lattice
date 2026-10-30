@@ -3,6 +3,7 @@ name = "todo"
 version = "0.1.0"
 edition = "2021"
 description = "Lattice reference app: a todo list. Builds to a WASM component implementing lattice:app/lifecycle."
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]
