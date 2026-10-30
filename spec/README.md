@@ -15,6 +15,8 @@
   app and host in-process, and may be sent by servers as `application/vnd.lattice.scene+cbor`.
 - **Hashes:** `sha256-` followed by the unpadded base64url SHA-256 digest (43 characters).
   Content fetched by hash is verified before use and cached immutably.
+- **Blobs:** content-addressed files (the entry component, assets) are fetched from `/.lattice/blob/{hash}` on the
+  manifest's origin and verified against `{hash}` before use. Servers send them `immutable`.
 - **Origin binding:** `manifest.app` must equal the host the manifest was fetched from over TLS.
 - **Discovery:** content negotiation on the page URL (`Accept: application/vnd.lattice.app+cbor`),
   with optional `/.well-known/lattice.json` and DNS `HTTPS` record hints.

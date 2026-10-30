@@ -1,0 +1,17 @@
+{
+  "lattice": "0.1",
+  "app": "todo.localhost",
+  "name": "Lattice Todo",
+  "description": "Reference app: a todo list that is a WASM component and a scene tree.",
+  "version": "0.1.0",
+  "lang": "en",
+  "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": {
+    "/": "Home",
+    "/about": "About"
+  },
+  "capabilities": {
+    "requires": ["storage.local"]
+  },
+  "fallback": { "html": "/" }
+}

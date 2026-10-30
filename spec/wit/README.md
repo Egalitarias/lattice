@@ -67,6 +67,16 @@ Two encodings of one model:
 `npm run validate` checks that both define the same 20 node types. A future conformance suite
 will round-trip scenes between the two forms.
 
+## Interaction rules
+
+- A `button` inside a `form` dispatches its own `on-press` action with the values of every named
+  field in that form (`action-call.values`). Pressing Enter in a text field dispatches the form's `on-submit`.
+- A control's `on-change` receives only that control's value, keyed by its `name`.
+- The UI layer never sends action names or arguments. It reports "node N, event E, values V"; the host looks up the
+  action reference it received from the app and rejects values for fields outside the node's form.
+- Re-sending a node with `set-node` re-asserts its props, including an input's `value` (this is how an app clears a
+  field). Nodes the app does not touch keep their user-edited state.
+
 ## Scene rules the host enforces
 
 Violations reject the call with `app-error.invalid`:

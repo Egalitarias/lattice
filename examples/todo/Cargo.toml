@@ -1,0 +1,16 @@
+[package]
+name = "todo"
+version = "0.1.0"
+edition = "2021"
+description = "Lattice reference app: a todo list. Builds to a WASM component implementing lattice:app/lifecycle."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

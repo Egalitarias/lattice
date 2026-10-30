@@ -14,6 +14,7 @@ const scene = ajv.compile(load(join(here, "scene.schema.json")));
 
 function walk(dir) {
   return readdirSync(dir).flatMap((n) => {
+    if (n === "target" || n === "node_modules") return [];
     const p = join(dir, n);
     return statSync(p).isDirectory() ? walk(p) : [p];
   });

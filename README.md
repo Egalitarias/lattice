@@ -6,7 +6,8 @@ and replaces the application layer with typed, compiled, semantic parts.
 
 **Lattice Navigator** is the host/client that runs Lattice apps.
 
-> Status: concept / pre-spec. Nothing here is implemented yet.
+> Status: draft spec 0.1 plus a working prototype (origin server, Lattice Navigator host, one reference app).
+> Not production software: see "Prototype limits" below.
 
 ## Principles
 
@@ -63,13 +64,54 @@ Stripe integrates via hosted Checkout first, then a host payment handler.
 - **Lattice**: the protocol/spec and bundle format (`.lattice`, `application/vnd.lattice.app+cbor`)
 - **Lattice Navigator**: the host/client application
 
+## Try it
+
+Needs Node 22+ and Rust with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`).
+
+```
+# 1. build the reference app (a todo list) into a WASM component
+cd examples/todo && cargo build --release --target wasm32-wasip2 && cd ../..
+
+# 2. start an origin that serves it
+cd server && npm install && node server.mjs --port 8080
+
+# 3. in another terminal, start Lattice Navigator pointed at it, then open the printed URL
+cd navigator && npm install && node navigator.mjs http://127.0.0.1:8080/ --dev
+```
+
+What happens: Lattice Navigator asks the origin for `application/vnd.lattice.app+cbor`, validates the manifest, downloads the
+component by content hash and refuses it if the bytes differ, runs it with only the host imports the manifest grants
+(here: `log` and `storage`), and renders the scene tree it returns. Browsers asking for HTML get a plain fallback page.
+
+Tests:
+
+```
+cd spec && npm install && npm run validate        # schemas, fixtures, WIT parses, WIT/schema agree
+cd navigator && npm test                                # 13 end-to-end tests with the real component
+cd navigator && node test/browser-check.mjs http://127.0.0.1:7070/   # drives Edge/Chrome through the UI
+```
+
+## Prototype limits
+
+- Lattice Navigator runs the component in Node and shows the UI in a local browser page. A browser-only Lattice Navigator (service
+  worker plus transpiled WASM) is not built yet.
+- Implemented host imports: `log`, `storage`. The rest of `spec/wit/capabilities.wit` is specified, not implemented.
+- Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
+  differs from the address fetched.
+- Renderer gaps: `layer` constraints, `canvas`, `media` with hashed sources, `ad-slot` and `embed` are placeholders.
+- Rust apps built for `wasm32-wasip2` import libc-level WASI; Lattice Navigator provides a sandboxed shim with no filesystem,
+  environment or network.
+- One user, one app instance per Lattice Navigator process.
+
 ## Roadmap
 
-1. Spec: manifest schema, scene-tree schema, capability catalog
-2. Prototype server with `Accept` negotiation and sample manifest
-3. Lattice Navigator browser polyfill (service worker + WASM + canvas/ARIA layer)
-4. Reference apps: todo/CRM, then a 2D multiplayer world
-5. Auth (OIDC + passkeys), then payments (Stripe Checkout), then analytics
+1. [x] Spec: manifest schema, scene-tree schema, capability catalog, WIT component interface
+2. [x] Prototype server with `Accept` negotiation and hash-verified components
+3. [x] Lattice Navigator (Node host + semantic browser UI), reference todo app, end-to-end and browser tests
+4. [ ] Typed RPC (`rpc` import) and a stateful server-backed app
+5. [ ] Browser-only Lattice Navigator (service worker + transpiled WASM)
+6. [ ] Auth (OIDC + passkeys), then payments (Stripe Checkout), then analytics
+7. [ ] A 2D multiplayer world (WebTransport + canvas)
 
 ## Open problems
 
