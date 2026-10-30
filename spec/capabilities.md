@@ -18,7 +18,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 
 | Capability | Purpose | Rendering | Prompt |
 |---|---|---|---|
-| `net.origin` | HTTPS requests to the app's own origin and its declared `api`/`stream` endpoints | data | none |
+| `net.origin` | Typed RPC (`rpc.md`) to the app's own origin, at the manifest `api` endpoint | data | none |
 | `net.realtime` | WebTransport streams and datagrams to declared endpoints | data | none |
 | `storage.local` | Origin-partitioned key-value and blob storage on the device | data | none |
 | `storage.sync` | `storage.local` replicated across the user's devices (end-to-end encrypted) | data | on use |
@@ -28,7 +28,7 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 
 | Capability | Purpose | Rendering | Prompt |
 |---|---|---|---|
-| `session` | Host-managed, origin-bound session token attached to `net.origin` calls. Not readable by app code | data | none |
+| `session` | Host-managed, origin-bound session token sent as `Lattice-Session` on RPC calls. Not readable by app code. Anonymous until an `auth.*` flow signs the user in | data | none |
 | `auth.passkey` | Register/assert a WebAuthn credential bound to the domain | host UI | each time |
 | `auth.oidc` | OIDC authorization-code + PKCE flow against a declared issuer (Google, Apple, GitHub, enterprise IdPs). App receives only the code/ID token | host UI | each time |
 | `identity.age_over` | Yes/no proof the user is over N, via verifiable credential. App never sees a birthdate | host UI | each time |

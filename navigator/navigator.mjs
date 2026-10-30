@@ -10,7 +10,10 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchApp, instantiateApp, LoadError } from "./runtime.mjs";
+import { fetchApp, prepareComponent, LoadError } from "./runtime.mjs";
+import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
+import { RpcClient, SessionStore } from "./rpc.mjs";
+import { CAPABILITY_IMPORTS } from "./host.mjs";
 import { SceneStore, SceneError, toArgs, argsObject } from "./scene.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -74,8 +77,9 @@ class Session {
   store = new SceneStore();
   path = "/";
   #chain = Promise.resolve();
-  constructor(lifecycle, manifest, origin, log) {
-    this.lifecycle = lifecycle;
+  constructor(host, manifest, origin, log) {
+    this.host = host;
+    this.manifest = manifest;
     this.routes = compileRoutes(manifest.routes);
     this.origin = origin;
     this.log = log;
@@ -88,10 +92,17 @@ class Session {
     return run;
   }
 
+  /** Run a call into the component, translating its failures into HttpErrors. */
   async #call(fn) {
     try {
-      return fn();
+      return await fn();
     } catch (e) {
+      if (e instanceof HttpError) throw e;
+      if (e instanceof HostCrash) {
+        this.log("error", `component stopped: ${e.message}`);
+        await this.#recover();
+        throw new HttpError(504, "The app stopped responding and was restarted.");
+      }
       const f = appFailure(e);
       if (!f) throw e;
       if (f.detail) this.log("error", `app error: ${f.detail}`);
@@ -99,49 +110,59 @@ class Session {
     }
   }
 
-  init(manifest) {
-    return this.serial(() =>
-      this.#call(() =>
-        this.lifecycle.init({
-          origin: this.origin,
-          locale: "en-US",
-          colorScheme: "light",
-          reducedMotion: false,
-          textScale: 1,
-          online: true,
-          granted: [...(manifest.capabilities?.requires ?? []), ...(manifest.capabilities?.optional ?? [])],
-        })
-      )
-    );
+  /** The worker was killed or died: start a fresh instance and show the current page again. */
+  async #recover() {
+    try {
+      await this.host.restart();
+      await this.#init();
+      await this.#route(this.path);
+    } catch (e) {
+      this.log("error", `could not restart the app: ${e.message}`);
+    }
+  }
+
+  #init() {
+    return this.host.call("init", {
+      origin: this.origin,
+      locale: "en-US",
+      colorScheme: "light",
+      reducedMotion: false,
+      textScale: 1,
+      online: true,
+      granted: [...(this.manifest.capabilities?.requires ?? []), ...(this.manifest.capabilities?.optional ?? [])],
+    });
+  }
+
+  async #route(rawPath) {
+    const u = new URL(rawPath, "http://x");
+    const m = matchRoute(this.routes, u.pathname);
+    if (!m) throw new HttpError(404, "That page does not exist.");
+    const scene = await this.host.call("route", {
+      handler: m.handler,
+      path: u.pathname,
+      params: toArgs(m.params),
+      query: toArgs(Object.fromEntries(u.searchParams)),
+    });
+    try {
+      this.store.load(scene);
+    } catch (e) {
+      if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid scene: ${e.message}`);
+      throw e;
+    }
+    this.path = u.pathname;
+  }
+
+  init() {
+    return this.serial(() => this.#call(() => this.#init()));
   }
 
   route(rawPath) {
-    return this.serial(() =>
-      this.#call(() => {
-        const u = new URL(rawPath, "http://x");
-        const m = matchRoute(this.routes, u.pathname);
-        if (!m) throw new HttpError(404, "That page does not exist.");
-        const scene = this.lifecycle.route({
-          handler: m.handler,
-          path: u.pathname,
-          params: toArgs(m.params),
-          query: toArgs(Object.fromEntries(u.searchParams)),
-        });
-        try {
-          this.store.load(scene);
-        } catch (e) {
-          if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid scene: ${e.message}`);
-          throw e;
-        }
-        this.path = u.pathname;
-        return {};
-      })
-    );
+    return this.serial(() => this.#call(() => this.#route(rawPath)));
   }
 
   act(source, event, values) {
     return this.serial(() =>
-      this.#call(() => {
+      this.#call(async () => {
         const field = { press: "onPress", submit: "onSubmit", change: "onChange" }[event];
         if (!field) throw new HttpError(400, "unknown event");
         const ref = this.store.actionRef(source, field);
@@ -155,7 +176,7 @@ class Session {
           if (!allowed.has(k)) throw new HttpError(400, `unexpected field ${k}`);
         }
 
-        const update = this.lifecycle.dispatch({
+        const update = await this.host.call("dispatch", {
           action: ref.action,
           args: ref.args,
           source,
@@ -213,13 +234,37 @@ async function readJson(req) {
   }
 }
 
-export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), log = defaultLog }) {
+export async function startNavigator({ url, dev = false, port = 7070, dataDir = join(here, ".navigator"), log = defaultLog, watchdogMs, rpcTimeoutMs }) {
   const cacheDir = join(dataDir, "cache");
-  const { url: appUrl, manifest, wasm } = await fetchApp(url, { dev, cacheDir });
+  const { url: appUrl, manifest, wasm, api } = await fetchApp(url, { dev });
   const origin = manifest.app;
-  const lifecycle = await instantiateApp({ manifest, wasm, origin, dataDir: join(dataDir, "data"), cacheDir, onLog: log });
-  const session = new Session(lifecycle, manifest, origin, log);
-  await session.init(manifest);
+  const entryJs = await prepareComponent({ manifest, wasm, cacheDir });
+
+  const granted = new Set([...(manifest.capabilities?.requires ?? []), ...(manifest.capabilities?.optional ?? [])]);
+  const rpc = api
+    ? new RpcClient({
+        endpoint: api.endpoint,
+        description: api.description,
+        apiHash: api.hash,
+        session: granted.has("session") ? new SessionStore(dataDir, origin) : null,
+        timeoutMs: rpcTimeoutMs,
+      })
+    : null;
+
+  const host = new AppHost({ entryJs, granted, origin, dataDir: join(dataDir, "data"), rpc, onLog: log, watchdogMs });
+  try {
+    await host.start();
+  } catch (e) {
+    if (e instanceof LinkFailure) {
+      throw new LoadError(
+        `component could not be linked: ${e.message}. It likely imports a capability that the manifest does not request ` +
+          `or that this Lattice Navigator does not implement. Implemented imports: ${Object.keys(CAPABILITY_IMPORTS).join(", ")}`
+      );
+    }
+    throw e;
+  }
+  const session = new Session(host, manifest, origin, log);
+  await session.init();
 
   const startPath = appUrl.pathname || "/";
   let lastError = null;
@@ -324,7 +369,8 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
     port: server.address().port,
     manifest,
     session,
-    close: () => new Promise((ok) => { clients.forEach((c) => c.end()); server.close(ok); server.closeAllConnections?.(); }),
+    host,
+    close: () => new Promise((ok) => { host.kill(); clients.forEach((c) => c.end()); server.close(ok); server.closeAllConnections?.(); }),
   };
 }
 

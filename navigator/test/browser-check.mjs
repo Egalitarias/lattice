@@ -1,7 +1,7 @@
 // Drives a real (headless) Chromium-family browser against a running Lattice Navigator over the DevTools
 // protocol: loads the page, interacts with it like a user, and checks the DOM and accessibility.
 //
-//   node test/browser-check.mjs http://127.0.0.1:7070/ [--shot out.png]
+//   node test/browser-check.mjs http://127.0.0.1:7070/ [--title "Lattice Todo"] [--shot out.png]
 //
 // Requires Edge or Chrome. Set BROWSER to override the executable.
 
@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const url = process.argv[2];
+const expectedTitle = process.argv.includes("--title") ? process.argv[process.argv.indexOf("--title") + 1] : "Lattice Todo";
 const shot = process.argv.includes("--shot") ? process.argv[process.argv.indexOf("--shot") + 1] : null;
 if (!url) { console.error("usage: node browser-check.mjs <nav url> [--shot file.png]"); process.exit(2); }
 
@@ -62,10 +63,10 @@ try {
   await cdp("Page.navigate", { url });
   for (let i = 0; i < 50; i++) { await sleep(200); if (await evalJs("!!document.querySelector('h1')")) break; }
 
-  check(await evalJs("document.title") === "Lattice Todo", "document title comes from the scene");
+  check(await evalJs("document.title") === expectedTitle, "document title comes from the scene");
   check(await evalJs("!!document.querySelector('header h1')"), "banner region -> <header> with <h1>");
-  check(await evalJs("!!document.querySelector('main[aria-label=\"Todo list\"]')"), "main landmark has an accessible name");
-  check(await evalJs("!!document.querySelector('form[aria-label=\"Add a todo\"] label[for] + input')"), "input has an associated <label>");
+  check(await evalJs("!!document.querySelector('main[aria-label]')"), "main landmark has an accessible name");
+  check(await evalJs("!!document.querySelector('form[aria-label] label[for] + input')"), "input has an associated <label>");
   check(await evalJs("document.querySelector('#app').children.length === 1"), "single root element");
 
   // Type into the input and press Enter (form submit), as a user would.
@@ -75,7 +76,7 @@ try {
   check(await evalJs("[...document.querySelectorAll('label.check')].some(l => l.textContent === 'Browser test todo')"), "submitting the form adds a todo");
   check(await evalJs("document.querySelector('input[name=title]').value === ''"), "input is cleared by the app's update");
   check(await evalJs("document.activeElement === document.querySelector('input[name=title]')"), "update.focus returns focus to the input");
-  check(await evalJs("document.querySelector('[aria-live=polite]')?.textContent.includes('item')"), "summary is a polite live region");
+  check(await evalJs("document.querySelector('[aria-live=polite]')?.textContent.match(/item|task/)"), "summary is a polite live region");
 
   // Typed text must survive an unrelated update (toggling a checkbox).
   await evalJs(`document.querySelector('input[name=title]').value = 'half typed'`);

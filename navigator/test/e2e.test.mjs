@@ -21,7 +21,7 @@ const close = (server) => new Promise((ok) => { server.close(ok); server.closeAl
 const quiet = () => {};
 
 async function withNavigator(fn, { dataDir } = {}) {
-  const app = loadApp({ appDir });
+  const app = await loadApp({ appDir });
   const origin = createServer(app);
   const originPort = await listen(origin);
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), "nav-e2e-"));
@@ -49,7 +49,7 @@ const find = (n, pred) => (pred(n) ? n : n.children.map((c) => find(c, pred)).fi
 const all = (n, pred, out = []) => (pred(n) && out.push(n), n.children.forEach((c) => all(c, pred, out)), out);
 
 test("origin negotiates: CBOR manifest for Lattice clients, HTML for everyone else", async () => {
-  const server = createServer(loadApp({ appDir }));
+  const server = createServer(await loadApp({ appDir }));
   const port = await listen(server);
   try {
     const lat = await fetch(`http://127.0.0.1:${port}/orders/1`, { headers: { Accept: MANIFEST_TYPE } });
@@ -178,7 +178,7 @@ function fakeOrigin({ manifest, blob, type = MANIFEST_TYPE }) {
 }
 
 test("refuses a component whose bytes do not match the manifest hash", async () => {
-  const real = loadApp({ appDir });
+  const real = await loadApp({ appDir });
   const server = fakeOrigin({ manifest: real.manifest, blob: Buffer.from("not the component you were promised") });
   const port = await listen(server);
   try {
@@ -195,7 +195,7 @@ test("refuses a server that is not a Lattice origin", async () => {
 });
 
 test("refuses an invalid manifest", async () => {
-  const real = loadApp({ appDir });
+  const real = await loadApp({ appDir });
   const server = fakeOrigin({ manifest: { ...real.manifest, capabilities: { requires: ["root.access"] } }, blob: Buffer.alloc(0) });
   const port = await listen(server);
   try {
@@ -205,7 +205,7 @@ test("refuses an invalid manifest", async () => {
 
 test("requires https and a matching domain outside --dev", async () => {
   await assert.rejects(fetchApp("http://example.com/", { cacheDir: tmpdir() }), (e) => e instanceof LoadError && /requires https/.test(e.message));
-  const real = loadApp({ appDir });
+  const real = await loadApp({ appDir });
   const server = fakeOrigin({ manifest: real.manifest, blob: Buffer.alloc(0) });
   const port = await listen(server);
   try {
@@ -215,7 +215,7 @@ test("requires https and a matching domain outside --dev", async () => {
 });
 
 test("a component that needs a capability the manifest does not grant fails to link", async () => {
-  const real = loadApp({ appDir });
+  const real = await loadApp({ appDir });
   const manifest = { ...real.manifest, capabilities: { requires: ["net.origin"] } }; // todo imports storage, not granted
   const server = fakeOrigin({ manifest, blob: real.blobs.get(real.manifest.entry).bytes });
   const port = await listen(server);

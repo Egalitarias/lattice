@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Lattice Navigator: prototype Lattice host. Fetches a manifest, verifies and runs the WASM component, and serves a semantic UI projection of its scene tree.",
-  "scripts": { "start": "node navigator.mjs", "test": "node --test test/e2e.test.mjs" },
+  "scripts": {
+    "start": "node navigator.mjs",
+    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs"
+  },
   "dependencies": {
     "@bytecodealliance/jco": "^1.40.0",
     "@bytecodealliance/preview2-shim": "^0.17.0",

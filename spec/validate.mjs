@@ -11,6 +11,7 @@ const ajv = new Ajv2020({ strict: false, allErrors: true });
 addFormats(ajv);
 const manifest = ajv.compile(load(join(here, "manifest.schema.json")));
 const scene = ajv.compile(load(join(here, "scene.schema.json")));
+const api = ajv.compile(load(join(here, "api.schema.json")));
 
 function walk(dir) {
   return readdirSync(dir).flatMap((n) => {
@@ -20,8 +21,10 @@ function walk(dir) {
   });
 }
 
-const pick = (file) =>
-  /manifest/.test(basename(file)) ? manifest : /scene/.test(basename(file)) ? scene : null;
+const pick = (file) => {
+  const n = basename(file);
+  return /manifest/.test(n) ? manifest : /scene/.test(n) ? scene : /^api\.json$|\.api\.json$/.test(n) ? api : null;
+};
 
 let failed = 0;
 const report = (ok, label, detail = "") => {

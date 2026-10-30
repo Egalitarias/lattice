@@ -1,4 +1,5 @@
-// Host-side implementations of the lattice:app capability imports.
+// Host-side implementations of the lattice:app capability imports. These run inside the worker
+// that hosts the component.
 //
 // An import is linked only when the manifest grants the capability that backs it. Anything else is
 // simply absent from the import object, so a component that needs it fails to instantiate.
@@ -10,16 +11,21 @@ import { join } from "node:path";
 export const CAPABILITY_IMPORTS = {
   "lattice:app/log": null, // always available
   "lattice:app/storage": ["storage.local", "storage.sync"],
+  "lattice:app/rpc": ["net.origin", "net.realtime"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
-function hostError(tag, val) {
+export function hostError(tag, val) {
   const e = new Error(val ? `${tag}: ${val}` : tag);
   e.payload = val === undefined ? { tag } : { tag, val };
   return e;
 }
 
-export function hostImports({ granted, origin, dataDir, onLog }) {
+/**
+ * @param rpcCall  (method, Uint8Array) => result; blocks until the host answers. Only provided when
+ *                 the app has an API.
+ */
+export function hostImports({ granted, origin, dataDir, onLog, rpcCall }) {
   const imports = {};
 
   imports["lattice:app/log"] = {
@@ -60,6 +66,24 @@ export function hostImports({ granted, origin, dataDir, onLog }) {
       listKeys(prefix) {
         return Object.keys(read()).filter((k) => k.startsWith(prefix));
       },
+    };
+  }
+
+  if (rpcCall && ["net.origin", "net.realtime"].some((c) => granted.has(c))) {
+    imports["lattice:app/rpc"] = {
+      call(method, request) {
+        const r = rpcCall(method, request);
+        if (r.ok) return r.bytes;
+        const e = r.error;
+        // WIT: rpc-error = host(host-error) | application(application-error) | transport(string)
+        const err = new Error(`rpc ${e.tag}`);
+        err.payload = e;
+        throw err;
+      },
+      subscribe() {
+        throw hostError("unavailable", "streaming is not implemented in this Lattice Navigator");
+      },
+      unsubscribe() {},
     };
   }
 

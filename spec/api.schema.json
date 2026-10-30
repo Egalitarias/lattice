@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lattice.invalid/spec/0.1/api.schema.json",
+  "title": "Lattice API Description",
+  "description": "The typed contract between an app and its origin's RPC endpoint. Its hash is the manifest's api.schema. Request and response bodies are CBOR on the wire and are validated against these JSON Schemas by the host (before sending / before the app sees them) and by the server.",
+  "type": "object",
+  "required": ["lattice-api", "title", "version", "methods"],
+  "additionalProperties": false,
+  "properties": {
+    "lattice-api": { "type": "string", "pattern": "^0\\.1(\\.\\d+)?$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "methods": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+      "additionalProperties": { "$ref": "#/$defs/method" }
+    }
+  },
+  "$defs": {
+    "method": {
+      "type": "object",
+      "required": ["request", "response"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string", "maxLength": 300 },
+        "effect": {
+          "description": "Side-effect class. Hosts may retry 'read' once after a network failure and never retry the others. 'financial' and 'destructive' calls are surfaced to agents as requiring confirmation.",
+          "enum": ["read", "write", "destructive", "financial"],
+          "default": "write"
+        },
+        "request": { "$ref": "#/$defs/bodySchema" },
+        "response": { "$ref": "#/$defs/bodySchema" },
+        "errors": {
+          "description": "Application error codes this method may return, beyond the standard ones in rpc.md.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["code"],
+            "additionalProperties": false,
+            "properties": {
+              "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+              "description": { "type": "string", "maxLength": 300 }
+            }
+          }
+        }
+      }
+    },
+    "bodySchema": {
+      "description": "A JSON Schema (2020-12 subset) whose instances are the decoded CBOR body. Must describe an object. No bytes or non-string map keys in v0.1.",
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "object" } }
+    }
+  }
+}

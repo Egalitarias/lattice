@@ -29,8 +29,10 @@ interface rpc {
         transport(string),
     }
 
-    /// Typed call against the manifest `api.url`. `request` and the response are deterministic
-    /// CBOR whose shape is fixed by the interface definition named in `api.schema`.
+    /// Typed call against the manifest `api.url`; see rpc.md. `request` and the response are CBOR
+    /// whose shape is fixed by the API description named in `api.schema`. The host validates both
+    /// directions, so a response the app receives has already matched its schema. Blocks the
+    /// caller's turn until the server answers or the host's timeout (10 s) expires.
     call: func(method: string, request: list<u8>) -> result<list<u8>, rpc-error>;
 
     /// Capability: net.realtime. Delivers `host-event.stream-message` for `topic`.

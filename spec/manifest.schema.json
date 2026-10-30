@@ -69,7 +69,7 @@
       "additionalProperties": false,
       "properties": {
         "url": { "type": "string", "format": "uri", "pattern": "^https://" },
-        "schema": { "description": "Hash of the interface definition (WIT).", "$ref": "#/$defs/hash" },
+        "schema": { "description": "Hash of the API description (api.schema.json), fetched from /.lattice/blob/{hash}. See rpc.md.", "$ref": "#/$defs/hash" },
         "stream": { "description": "Optional WebTransport endpoint for server push / real time.", "type": "string", "pattern": "^https://" }
       }
     },

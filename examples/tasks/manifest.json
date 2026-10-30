@@ -1,0 +1,24 @@
+{
+  "lattice": "0.1",
+  "app": "tasks.localhost",
+  "name": "Lattice Tasks",
+  "description": "Reference app: a todo list whose state lives on the server, reached over typed RPC.",
+  "version": "0.1.0",
+  "lang": "en",
+  "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": { "/": "Home", "/about": "About" },
+  "api": {
+    "url": "https://tasks.localhost/rpc",
+    "schema": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "capabilities": { "requires": ["net.origin", "session"] },
+  "actions": [
+    {
+      "name": "add_task",
+      "description": "Add a task to the list.",
+      "effect": "write",
+      "input": { "type": "object", "properties": { "title": { "type": "string" } }, "required": ["title"] }
+    }
+  ],
+  "fallback": { "html": "/" }
+}

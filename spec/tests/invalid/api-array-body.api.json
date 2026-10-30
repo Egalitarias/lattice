@@ -1,0 +1,15 @@
+{
+  "lattice-api": "0.1",
+  "title": "x",
+  "version": "1.0.0",
+  "methods": {
+    "ping": {
+      "request": {
+        "type": "array"
+      },
+      "response": {
+        "type": "object"
+      }
+    }
+  }
+}

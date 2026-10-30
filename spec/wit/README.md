@@ -91,8 +91,10 @@ Violations reject the call with `app-error.invalid`:
 
 ## Not specified yet
 
-- Async. WIT 0.2 functions are synchronous, so a long host call blocks the app's turn. Move to
-  WASI 0.3 native async when stable; the interfaces are written so that change is mechanical.
+- Async. WIT 0.2 functions are synchronous, so a host call such as `rpc.call` blocks the app's turn. Lattice Navigator runs each
+  component on its own thread and blocks it on a shared buffer while the main thread does the I/O, so the host
+  stays responsive and a hung component can be killed. Move to WASI 0.3 native async when stable; the interfaces
+  are written so that change is mechanical.
 - `gpu.surface`: the `canvas` node carries a surface name, but the drawing API (likely wasi-gfx) is open.
 - `share`, `files.pick`, `contacts.pick`, `identity.age_over`, `camera`, `microphone`, `location`, `experiments`.
 - State snapshot and restore across suspend.
