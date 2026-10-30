@@ -1,1 +1,3 @@
 node_modules/
+spec/.wit-out/
+spec/.wit-out-embed/

@@ -5,6 +5,7 @@
 | [`manifest.schema.json`](manifest.schema.json) | App manifest: identity, entry component, routes, API, capabilities, actions, auth, payments, analytics, legal |
 | [`scene.schema.json`](scene.schema.json) | Scene tree: the UI an app hands to Lattice Navigator |
 | [`capabilities.md`](capabilities.md) | Capability catalog and rules |
+| [`wit/`](wit/README.md) | Component interface (WIT): how an app and Lattice Navigator talk, and capabilities as imports |
 
 ## Conventions
 
@@ -37,14 +38,14 @@ npm install
 npm run validate
 ```
 
-Validates every file in `../examples/**/manifest.json` against the manifest schema and every
+Also checks that `wit/scene.wit` and the scene schema agree on node types, and that both WIT worlds parse. Validates every file in `../examples/**/manifest.json` against the manifest schema and every
 `../examples/**/scene*.json` against the scene schema, and checks that the negative fixtures in
 `tests/invalid/` are rejected.
 
 ## Status and next documents
 
 - [ ] Wire protocol: request/response framing for typed RPC, error model
-- [ ] Host <-> app component interface (WIT): `init`, `route`, `dispatch`, `render`
+- [x] Host <-> app component interface (WIT), see `wit/`
 - [ ] Payment handler interface and token format
 - [ ] Ad network interface and measurement report format
 - [ ] Conformance test suite

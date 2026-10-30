@@ -1,0 +1,339 @@
+package lattice:app@0.1.0;
+
+/// The in-process form of the scene tree defined by `scene.schema.json`.
+///
+/// WIT has no recursive types, so the tree is an arena: `scene.nodes` is a flat table and a node
+/// names its children by `node-id`. Ids are chosen by the app and are stable across updates, which
+/// is what lets the host diff, preserve focus, and keep scroll positions.
+///
+/// Rules (checked by the host, which rejects the update with `app-error.invalid`):
+///   - Every id appears at most once in `nodes`, and the nodes reachable from `root` form a tree.
+///   - Required accessible names are carried in the body record (`button.label`, `input.label`).
+///   - `image.alt` may be empty only when `image.decorative` is true.
+interface scene {
+    use types.{scalar, args};
+
+    type node-id = u32;
+
+    enum token { none, xs, sm, md, lg, xl }
+
+    enum tone { default, muted, accent, positive, caution, critical }
+
+    enum axis { vertical, horizontal }
+
+    enum scroll-axis { vertical, horizontal, both }
+
+    enum align { start, center, end, stretch }
+
+    enum justify { start, center, end, between }
+
+    record units-size {
+        /// Density-independent units, scaled by the host.
+        value: f32,
+        min: option<f32>,
+        max: option<f32>,
+    }
+
+    variant size {
+        hug,
+        fill,
+        /// 0 < fraction <= 1 of the parent's extent.
+        fraction(f32),
+        units(units-size),
+    }
+
+    /// Dispatches a named handler in the app via `app.dispatch`. Never evaluated as code.
+    record action-ref {
+        action: string,
+        args: args,
+    }
+
+    /// Properties every node may carry.
+    record common {
+        hidden: bool,
+        width: option<size>,
+        height: option<size>,
+        padding: option<token>,
+        tone: option<tone>,
+        /// Accessible name for nodes where it is optional. Nodes that require one carry it in
+        /// their body record instead.
+        label: option<string>,
+        description: option<string>,
+        lang: option<string>,
+    }
+
+    // ---- Layout -------------------------------------------------------------------------------
+
+    record stack {
+        axis: axis,
+        gap: token,
+        align: align,
+        justify: justify,
+        wrap: bool,
+    }
+
+    variant grid-columns {
+        fixed(u8),
+        /// As many columns as fit with at least this many units each.
+        auto-min(f32),
+    }
+
+    record grid {
+        columns: grid-columns,
+        gap: token,
+    }
+
+    record scroll {
+        axis: scroll-axis,
+        /// Dispatched when scrolled near the end (infinite lists).
+        on-end: option<action-ref>,
+    }
+
+    enum constraint-attr { left, right, top, bottom, width, height, center-x, center-y }
+
+    enum constraint-strength { required, strong, medium, weak }
+
+    /// target.attr = ref.ref-attr * multiplier + offset
+    record constraint {
+        target: node-id,
+        attr: constraint-attr,
+        /// None means the parent layer.
+        ref: option<node-id>,
+        ref-attr: option<constraint-attr>,
+        multiplier: f32,
+        offset: f32,
+        strength: constraint-strength,
+    }
+
+    record layer {
+        constraints: list<constraint>,
+    }
+
+    enum landmark {
+        banner, navigation, main, complementary, contentinfo, search, dialog, alert, status,
+    }
+
+    record region {
+        role: landmark,
+        label: string,
+    }
+
+    // ---- Content ------------------------------------------------------------------------------
+
+    record heading {
+        level: u8,
+        text: string,
+    }
+
+    enum text-style { body, caption, code, quote }
+
+    enum text-emphasis { none, strong, em }
+
+    record text {
+        text: string,
+        style: text-style,
+        emphasis: text-emphasis,
+        max-lines: option<u32>,
+        selectable: bool,
+    }
+
+    record link {
+        /// Absolute path on this origin, or an https URL.
+        target: string,
+        label: string,
+        /// Visible text; the host uses `label` when absent.
+        text: option<string>,
+        /// Cross-origin. Requires `navigate.external` unless same-origin.
+        external: bool,
+    }
+
+    /// Hash (`sha256-...`) or https URL.
+    type source = string;
+
+    enum fit { contain, cover, fill }
+
+    record image {
+        src: source,
+        alt: string,
+        decorative: bool,
+        fit: fit,
+    }
+
+    enum media-kind { audio, video }
+
+    record media {
+        kind: media-kind,
+        src: source,
+        label: string,
+        captions: option<source>,
+        autoplay: bool,
+        controls: bool,
+    }
+
+    record canvas {
+        label: string,
+        description: string,
+        /// Surface handle granted via `gpu.surface`.
+        surface: option<string>,
+        on-input: option<action-ref>,
+    }
+
+    // ---- Controls -----------------------------------------------------------------------------
+
+    enum button-emphasis { primary, secondary, plain }
+
+    record button {
+        label: string,
+        text: option<string>,
+        emphasis: button-emphasis,
+        disabled: bool,
+        on-press: action-ref,
+    }
+
+    record form {
+        label: string,
+        /// Receives every named field value in `action-call.values`.
+        on-submit: action-ref,
+    }
+
+    enum input-kind {
+        text, multiline, email, tel, url, number, password, date, time, search, one-time-code,
+    }
+
+    record input {
+        name: string,
+        kind: input-kind,
+        label: string,
+        value: option<string>,
+        placeholder: option<string>,
+        required: bool,
+        /// Excluded from analytics, crash reports and any session-replay projection.
+        sensitive: bool,
+        autocomplete: option<string>,
+        min: option<f64>,
+        max: option<f64>,
+        max-length: option<u32>,
+        on-change: option<action-ref>,
+    }
+
+    record select-option {
+        value: string,
+        text: string,
+    }
+
+    record select {
+        name: string,
+        label: string,
+        options: list<select-option>,
+        value: option<string>,
+        required: bool,
+        on-change: option<action-ref>,
+    }
+
+    record checkbox {
+        name: string,
+        label: string,
+        checked: bool,
+        on-change: option<action-ref>,
+    }
+
+    record item-list {
+        ordered: bool,
+    }
+
+    record table-column {
+        key: string,
+        title: string,
+        align: align,
+        sortable: bool,
+    }
+
+    record table {
+        label: string,
+        columns: list<table-column>,
+        /// Row-major. Each row has exactly one cell per column, in column order.
+        rows: list<list<scalar>>,
+        on-sort: option<action-ref>,
+        on-row-press: option<action-ref>,
+    }
+
+    // ---- Host-rendered and sandboxed ----------------------------------------------------------
+
+    enum ad-format { banner, native, video, rewarded }
+
+    /// Filled and drawn by the host in an isolated surface. The app never sees the creative.
+    record ad-slot {
+        format: ad-format,
+        placement: string,
+        categories-blocked: list<string>,
+        /// Receives a signed reward token as the `token` argument (format = rewarded).
+        on-reward: option<action-ref>,
+    }
+
+    /// A hash-pinned third-party component declared in the manifest `dependencies`.
+    record embed {
+        provider: string,
+        label: string,
+        props: args,
+    }
+
+    // ---- Tree ---------------------------------------------------------------------------------
+
+    variant body {
+        stack(stack),
+        grid(grid),
+        scroll(scroll),
+        layer(layer),
+        region(region),
+        heading(heading),
+        text(text),
+        link(link),
+        button(button),
+        form(form),
+        input(input),
+        select(select),
+        checkbox(checkbox),
+        item-list(item-list),
+        table(table),
+        image(image),
+        media(media),
+        canvas(canvas),
+        ad-slot(ad-slot),
+        embed(embed),
+    }
+
+    record node {
+        id: node-id,
+        common: common,
+        body: body,
+        /// Ordered. Leaf bodies (`heading`, `text`, `image`, ...) must have none.
+        children: list<node-id>,
+    }
+
+    record scene {
+        title: string,
+        lang: option<string>,
+        /// Node whose subtree changes are announced to assistive technology.
+        live: option<node-id>,
+        root: node-id,
+        nodes: list<node>,
+    }
+
+    /// Incremental change to the current scene.
+    variant patch-op {
+        /// Insert the node, or replace the node with the same id (including its child list).
+        set-node(node),
+        /// Remove the node. Its descendants are removed unless re-parented in the same patch.
+        remove-node(node-id),
+        set-root(node-id),
+        set-title(string),
+        set-live(option<node-id>),
+    }
+
+    record update {
+        /// Applied in order, atomically. The result must satisfy the scene rules above.
+        ops: list<patch-op>,
+        /// Move keyboard and assistive-technology focus here after applying `ops`.
+        focus: option<node-id>,
+    }
+}

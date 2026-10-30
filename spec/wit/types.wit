@@ -1,0 +1,46 @@
+package lattice:app@0.1.0;
+
+/// Shared value and error types.
+interface types {
+    /// A primitive value. Used for action arguments, form values, table cells and embed props.
+    /// Deliberately not recursive: structured payloads travel as CBOR bytes over `rpc`.
+    variant scalar {
+        null,
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+    }
+
+    /// Ordered name/value pairs. Names are unique; later entries win if a producer violates that.
+    type args = list<tuple<string, scalar>>;
+
+    /// Error returned by any host-provided function.
+    variant host-error {
+        /// The manifest did not request the capability, or the host refused to grant it.
+        capability-denied(string),
+        /// The user revoked the capability. Takes effect immediately.
+        capability-revoked(string),
+        /// The user dismissed a prompt or sheet.
+        cancelled,
+        invalid-argument(string),
+        /// The feature exists but cannot run now (offline, no hardware, unsupported by this host).
+        unavailable(string),
+        rate-limited,
+        internal(string),
+    }
+
+    /// Error returned by an app export. The host renders a standard, accessible error view.
+    variant app-error {
+        /// No such route or resource. Host shows a not-found view.
+        not-found,
+        /// User must sign in. Host starts the app's declared auth flow, then repeats the call.
+        unauthorized,
+        /// The request is understood but not allowed.
+        forbidden,
+        /// The app rejected its input. Message is shown to the user.
+        invalid(string),
+        /// Bug or failure. Message is for diagnostics and is not shown verbatim.
+        internal(string),
+    }
+}

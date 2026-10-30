@@ -1,0 +1,179 @@
+package lattice:app@0.1.0;
+
+/// Host-provided interfaces. Each import is the linkable form of a capability in `capabilities.md`.
+/// The host links an import only if the manifest requests the matching capability; a component
+/// that imports anything else fails to instantiate. That is how "no ambient authority" is enforced.
+
+interface log {
+    enum level { debug, info, warn, error }
+
+    write: func(level: level, message: string);
+}
+
+/// Capability: net.origin
+interface rpc {
+    use types.{host-error};
+
+    record application-error {
+        /// Stable machine-readable code defined by the app's API schema.
+        code: string,
+        message: string,
+        /// CBOR, schema-defined. May be empty.
+        details: list<u8>,
+    }
+
+    variant rpc-error {
+        host(host-error),
+        application(application-error),
+        /// Network or protocol failure. The host attaches the session to the request.
+        transport(string),
+    }
+
+    /// Typed call against the manifest `api.url`. `request` and the response are deterministic
+    /// CBOR whose shape is fixed by the interface definition named in `api.schema`.
+    call: func(method: string, request: list<u8>) -> result<list<u8>, rpc-error>;
+
+    /// Capability: net.realtime. Delivers `host-event.stream-message` for `topic`.
+    subscribe: func(topic: string) -> result<_, host-error>;
+
+    unsubscribe: func(topic: string);
+}
+
+/// Capability: storage.local (and storage.sync, which replicates the same namespace)
+interface storage {
+    use types.{host-error};
+
+    get: func(key: string) -> result<option<list<u8>>, host-error>;
+
+    set: func(key: string, value: list<u8>) -> result<_, host-error>;
+
+    delete: func(key: string) -> result<_, host-error>;
+
+    list-keys: func(prefix: string) -> result<list<string>, host-error>;
+}
+
+/// Navigation within and out of the app.
+interface navigation {
+    use types.{host-error};
+
+    enum mode { push, replace }
+
+    /// Same-origin path. The host resolves it through the manifest routes and calls `app.route`.
+    go: func(path: string, mode: mode) -> result<_, host-error>;
+
+    back: func();
+
+    /// Capability: navigate.external. Opens an https URL in an isolated system view.
+    open-external: func(url: string) -> result<_, host-error>;
+}
+
+/// Capability: session
+interface session {
+    record info {
+        signed-in: bool,
+        /// Opaque user identifier chosen by the app's server. The token itself is never exposed.
+        subject: option<string>,
+        /// Unix seconds.
+        expires-at: option<u64>,
+    }
+
+    current: func() -> info;
+
+    /// Clears the host-held session and tells the server via `auth.token_endpoint` if declared.
+    sign-out: func();
+}
+
+/// Capabilities: auth.passkey, auth.oidc
+interface auth {
+    use types.{host-error};
+    use session.{info};
+
+    /// Runs the OIDC authorization-code + PKCE flow for the manifest provider with this
+    /// `issuer`, then exchanges the code at `auth.token_endpoint`. The host holds the verifier;
+    /// the app never sees the code or tokens.
+    sign-in-oidc: func(issuer: string) -> result<info, host-error>;
+
+    /// Creates a passkey. `options` is the server-issued WebAuthn creation options (JSON bytes).
+    /// Returns the attestation response (JSON bytes) for the app to send to its server.
+    passkey-create: func(options: list<u8>) -> result<list<u8>, host-error>;
+
+    /// Asserts with a passkey. `options` is the server-issued request options (JSON bytes).
+    passkey-assert: func(options: list<u8>) -> result<list<u8>, host-error>;
+}
+
+/// Capability: payments.request, payments.mandate
+interface payments {
+    use types.{host-error};
+
+    record line-item {
+        label: string,
+        /// Minor currency units (cents). Informational: the server computes the charged amount.
+        amount-minor: s64,
+        quantity: u32,
+    }
+
+    record payment-request {
+        /// ISO 4217 code, e.g. "USD".
+        currency: string,
+        items: list<line-item>,
+        /// Server-issued reference binding this request to an order. The token is bound to it.
+        order-ref: string,
+        /// Restrict to one handler named in manifest `payments.handlers`.
+        handler: option<string>,
+        /// Ask the user to also approve recurring charges (`payments.mandate`).
+        recurring: bool,
+    }
+
+    /// Single-use. Bound to origin, merchant, `order-ref` and total. The app forwards it to its
+    /// own server, which completes the charge with the payment processor.
+    record payment-token {
+        handler: string,
+        token: string,
+        /// Unix seconds.
+        expires-at: u64,
+    }
+
+    /// The host draws the payment sheet, tokenises, and runs strong customer authentication.
+    /// The app never sees card data. Returns `cancelled` if the user dismisses the sheet.
+    request: func(request: payment-request) -> result<payment-token, host-error>;
+}
+
+/// Capability: analytics.event
+interface analytics {
+    use types.{args};
+
+    /// Delivered to the endpoints declared in manifest `analytics.processors`, subject to the
+    /// user's global analytics level. Never include values from `sensitive` inputs.
+    emit: func(name: string, props: args);
+}
+
+/// Capability: notifications
+interface notifications {
+    use types.{host-error};
+
+    record push-subscription {
+        /// Opaque endpoint and keys for the app's server to push to (Web Push compatible).
+        endpoint: string,
+        p256dh: list<u8>,
+        auth: list<u8>,
+    }
+
+    subscribe-push: func() -> result<push-subscription, host-error>;
+}
+
+/// Capability: consent
+interface consent {
+    use types.{host-error};
+
+    record receipt {
+        kind: string,
+        document-version: string,
+        /// Unix seconds.
+        recorded-at: u64,
+        /// Host-signed over (origin, kind, document-version, recorded-at).
+        signature: list<u8>,
+    }
+
+    /// Shows the host consent prompt and records the outcome. `cancelled` means refused.
+    request: func(kind: string, document-version: string) -> result<receipt, host-error>;
+}

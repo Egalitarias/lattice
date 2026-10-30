@@ -1,0 +1,143 @@
+package lattice:app@0.1.0;
+
+/// What an app component exports. The model is a state machine owned by the app: the host calls in
+/// with a route, a user action, or an event, and the app answers with a scene or a patch. The host
+/// never reaches into app state, and the app never touches the display.
+///
+/// Calls are serialised: the host does not start a call until the previous one has returned.
+interface lifecycle {
+    use types.{args, app-error};
+    use scene.{scene, update, node-id};
+
+    enum color-scheme { light, dark }
+
+    /// Facts about the user's environment. Preferences, not styling hooks: the host already applies
+    /// them when it resolves tokens, and apps use them only for content decisions.
+    record launch {
+        origin: string,
+        /// BCP 47.
+        locale: string,
+        color-scheme: color-scheme,
+        reduced-motion: bool,
+        /// 1.0 is default.
+        text-scale: f32,
+        online: bool,
+        /// Manifest capability names the host actually granted (`requires` plus accepted `optional`).
+        granted: list<string>,
+    }
+
+    record route-request {
+        /// Handler name from manifest `routes`.
+        handler: string,
+        /// Full path as navigated, e.g. "/orders/42".
+        path: string,
+        /// Captures from `{param}` and `{param*}`.
+        params: args,
+        query: args,
+    }
+
+    record key-event {
+        key: string,
+        /// "shift", "ctrl", "alt", "meta".
+        modifiers: list<string>,
+        pressed: bool,
+    }
+
+    record pointer-event {
+        x: f32,
+        y: f32,
+        /// 0 = primary.
+        button: u8,
+        pressed: bool,
+    }
+
+    variant input-event {
+        pointer(pointer-event),
+        key(key-event),
+    }
+
+    /// A user, canvas, ad or agent invocation of a named action.
+    record action-call {
+        action: string,
+        /// Static arguments from the `action-ref` that fired.
+        args: args,
+        /// Node that fired it. None when invoked by an agent through the manifest `actions` surface.
+        source: option<node-id>,
+        /// Form field values (`form.on-submit`) or the new value (`on-change`).
+        values: args,
+        input: option<input-event>,
+    }
+
+    record stream-message {
+        topic: string,
+        /// CBOR, schema-defined.
+        payload: list<u8>,
+    }
+
+    variant host-event {
+        stream-message(stream-message),
+        visibility(bool),
+        online(bool),
+        /// Capability name. Calls using it now fail with `capability-revoked`.
+        capability-revoked(string),
+        locale-changed(string),
+    }
+
+    /// Called once, before any other export. A failure aborts launch with a host error view.
+    init: func(launch: launch) -> result<_, app-error>;
+
+    /// Navigation. Returns the whole scene for the new page.
+    route: func(request: route-request) -> result<scene, app-error>;
+
+    /// A named action fired. Returns changes to the current scene.
+    dispatch: func(call: action-call) -> result<update, app-error>;
+
+    /// Something happened that the user did not trigger.
+    on-event: func(event: host-event) -> result<update, app-error>;
+}
+
+/// The maximal set of imports an app may use. A component links only the ones it needs, and the
+/// host satisfies only those the manifest requested. Not provided, deliberately: wall-clock
+/// timers beyond `wasi:clocks`, raw sockets, a filesystem, process spawning, and any dynamic code
+/// loading. Components may additionally import the deterministic subset of WASI (`wasi:clocks`,
+/// `wasi:random`).
+world app {
+    import log;
+    import rpc;
+    import storage;
+    import navigation;
+    import session;
+    import auth;
+    import payments;
+    import analytics;
+    import notifications;
+    import consent;
+
+    export lifecycle;
+}
+
+/// A hash-pinned third-party component (maps, chat, players) rendered via the `embed` scene node.
+/// It can use only the capabilities listed for it under manifest `dependencies`.
+interface embed-provider {
+    use types.{args, app-error};
+    use scene.{scene, update};
+    use lifecycle.{action-call};
+
+    /// Called when an `embed` node with this provider enters the tree.
+    mount: func(props: args) -> result<scene, app-error>;
+
+    /// The props of the mounted node changed.
+    props-changed: func(props: args) -> result<update, app-error>;
+
+    dispatch: func(call: action-call) -> result<update, app-error>;
+
+    unmount: func();
+}
+
+world embed {
+    import log;
+    import rpc;
+    import storage;
+
+    export embed-provider;
+}

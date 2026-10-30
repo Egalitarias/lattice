@@ -3,6 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "description": "Schema validation for the Lattice specification",
-  "scripts": { "validate": "node validate.mjs" },
-  "dependencies": { "ajv": "^8.17.1", "ajv-formats": "^3.0.1" }
+  "scripts": {
+    "validate": "node validate.mjs && node check-wit.mjs && npm run wit",
+    "wit": "jco types wit --world-name app -o .wit-out && jco types wit --world-name embed -o .wit-out-embed"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.40.0"
+  }
 }
