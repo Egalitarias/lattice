@@ -200,7 +200,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 2. [x] Prototype server with `Accept` negotiation and hash-verified components
 3. [x] Lattice Navigator (Node host + semantic browser UI), reference todo app, end-to-end and browser tests
 4. [x] Typed RPC (`rpc` import), API descriptions, and a server-backed app
-5. [ ] Browser-only Lattice Navigator (service worker + transpiled WASM)
+5. [x] Browser Lattice Navigator, served by the app's own origin (service worker + transpiled WASM; `spec/browser.md`)
 6. [x] Auth: OIDC and passkeys, host-drawn sign-in, session upgrade
 6b. [x] Payments: hosted checkout (Stripe), signed webhooks, server-priced orders
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
