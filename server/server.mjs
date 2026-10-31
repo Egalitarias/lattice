@@ -31,6 +31,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { encode } from "../shared/cbor.mjs";
 import { createRpc } from "./rpc.mjs";
+import { memoryStore, openStore } from "./store.mjs";
 import { createTopics } from "./topics.mjs";
 import { startWebTransport, loadCertFiles } from "./webtransport.mjs";
 
@@ -111,7 +112,7 @@ const schemaValidator = (name) => {
   };
 };
 
-export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe = null, log = console.error }) {
+export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe = null, data = null, log = console.error }) {
   const wasm = readFileSync(findComponent(appDir));
   const blobs = new Map();
   const entry = hashOf(wasm);
@@ -137,6 +138,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   let rpcPath = null;
   let http = {};
   let impl = null;
+  let store = null;
   const apiFile = join(appDir, "api.json");
   if (existsSync(apiFile)) {
     const apiBytes = readFileSync(apiFile);
@@ -150,7 +152,8 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
     const mod = await import(pathToFileURL(join(appDir, "api.mjs")).href);
     // Topics exist before setup, so handlers can publish to them; who may subscribe is decided by impl.authorizeTopic.
     topics = createTopics({ apiDescription, apiHash, authorize: (topic, ctx) => impl?.authorizeTopic?.(topic, ctx), log });
-    impl = mod.setup ? await mod.setup({ manifest, oidc, dev, stripe, log, topics }) : { handlers: mod.handlers, http: mod.http };
+    store = data ? await openStore(data, { log }) : memoryStore();
+    impl = mod.setup ? await mod.setup({ manifest, oidc, dev, stripe, log, topics, store }) : { handlers: mod.handlers, http: mod.http };
     http = impl.http ?? {};
     rpc = createRpc({ apiDescription, apiHash, handlers: impl.handlers, log });
   } else if (manifest.api) {
@@ -158,7 +161,7 @@ export async function loadApp({ appDir, domain, oidc = [], dev = false, stripe =
   }
 
   schemaValidator("manifest.schema.json")(manifest, "manifest");
-  return { manifest, blobs, rpc, rpcPath, http, impl, dev, topics, apiDescription };
+  return { manifest, blobs, rpc, rpcPath, http, impl, dev, topics, apiDescription, store };
 }
 
 /**
@@ -270,6 +273,7 @@ function args(argv) {
     else if (argv[i] === "--app") out.app = resolve(argv[++i]);
     else if (argv[i] === "--domain") out.domain = argv[++i];
     else if (argv[i] === "--dev") out.dev = true;
+    else if (argv[i] === "--data") out.data = resolve(argv[++i]);
     else if (argv[i] === "--navigator-dist") out.navigatorDist = resolve(argv[++i]);
     else if (argv[i] === "--no-navigator") out.noNavigator = true;
     else if (argv[i] === "--no-webtransport") out.wt = false;
@@ -294,7 +298,7 @@ function args(argv) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const a = args(process.argv.slice(2));
-  const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev, stripe: a.stripe });
+  const app = await loadApp({ appDir: a.app, domain: a.domain, oidc: a.oidc, dev: a.dev, stripe: a.stripe, data: a.data });
   const navigator = a.noNavigator ? null : loadNavigator(a.navigatorDist);
   // Topics over WebTransport as well, if the app has any and the optional packages are installed. A real deployment
   // supplies a certificate; --dev makes a throwaway one that the manifest tells development hosts how to pin.
@@ -306,6 +310,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     console.log(`lattice server for ${app.manifest.app} on http://127.0.0.1:${a.port}`);
     console.log(`  entry ${app.manifest.entry}`);
     if (app.manifest.api) console.log(`  api   ${app.manifest.api.schema} at ${app.rpcPath}/<method>`);
+    if (app.manifest.api) console.log(a.data ? `  data  ${a.data}` : "  data  in memory, lost on exit (--data <file> keeps it)");
     if (Object.keys(app.apiDescription?.topics ?? {}).length) console.log(wt ? `  webtransport: ${wt.url} (udp ${wt.port})` : "  webtransport: not offered (topics use streaming HTTPS)");
     console.log(navigator ? "  browser navigator: serving it to browsers" : "  browser navigator: not built (run: cd navigator && npm run build:browser)");
   });

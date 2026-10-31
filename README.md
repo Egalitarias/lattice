@@ -162,13 +162,16 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 - Implemented host imports: `log`, `storage`, `rpc` (including topic subscriptions), `session`, `auth`, `payments`,
   `analytics`, `experiments`. The rest of `spec/wit/capabilities.wit` (`navigation`, `notifications`, `consent`) is
   specified, not implemented.
-- Auth: OIDC and passkeys work end to end, but accounts and sessions live in the origin's memory, there is no account
+- State: with `--data <file>` the origin keeps accounts, sessions, orders and signed-in users' tasks across restarts (SQLite,
+  through Node's still-experimental `node:sqlite`; one process per file). Without it they are in memory. In memory either
+  way: analytics events, anonymous tasks, passkey challenges.
+- Auth: OIDC and passkeys work end to end, but there is no account
   recovery or credential management, and the only identity provider tried is the bundled development one (it is
   standards-shaped but not a real provider). Passkeys need Navigator's page served from the app's domain, so in this
   prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
 - Payments: hosted checkout, or a card sheet the host draws itself (`stripe-card`, with 3-D Secure in the bank's own window; see "Honest limits" in `spec/payments.md`: processors restrict raw card handling). The server code uses the
   official `stripe` library but has only been run against the bundled stand-in, which mirrors Stripe's documentation.
-  There is no wallet sheet, no recurring payments, refunds or receipts, and orders are in memory.
+  There is no wallet sheet, no recurring payments, refunds or receipts.
   A double payment (two checkout sessions for one order both paid) is detected and logged but not refunded.
   The server only accepts return addresses on the app's own domain, and Navigator serves its page there only for
   `*.localhost` names, so (like passkeys) payments work for `.localhost` apps in this prototype.
@@ -178,7 +181,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   Not specified: session replay, consent flows, per-purpose levels, retention. Redaction
   catches values the user typed into sensitive inputs and common personal-data patterns in error text; it cannot catch
   data the app has transformed. The processor's server necessarily sees the user's IP address.
-- RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`). The prototype origin keeps state in memory.
+- RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`).
 - Server push: declared `topics` delivered over WebTransport (HTTP/3, via the optional `@fails-components/webtransport`
   package) or, as a fallback, streaming HTTPS (`spec/rpc.md`, "Topics"); validated by the host, bounded and
   re-connecting. WebTransport datagrams are not used. A development certificate is pinned through the manifest
@@ -207,6 +210,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
 7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
 7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface
+8. [x] Durable origin state: `--data` keeps accounts, sessions and orders across restarts
 
 ## License
 

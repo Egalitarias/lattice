@@ -7,11 +7,15 @@
 //   - webhookEndpoint:  Stripe calls this; the ONLY place an order becomes paid
 //   - onPaid(fn):       fulfilment hook, called once per order
 //
-// Orders are in memory. A real origin would persist them.
+// Orders live in the store it is given. An order is saved as paid before it is fulfilled, and marked fulfilled afterwards, so
+// recover() can finish one that a crash interrupted: fulfilment hooks run at least once and must tolerate a repeat.
+// Seen webhook ids stay in memory: an id saved just before a crash would make the processor's retry look like a duplicate,
+// and a real duplicate after a restart finds the order already paid.
 
 import { randomBytes } from "node:crypto";
 import Stripe from "stripe";
 import { ApiError } from "./rpc.mjs";
+import { memoryStore } from "./store.mjs";
 
 const RETURN_PATH = "/_navigator/payment/return";
 const CANCEL_PATH = "/_navigator/payment/cancel";
@@ -28,11 +32,13 @@ export function createPayments({
   processorApi, // base URL of the processor's API that the host may call with the publishable key, e.g. https://api.stripe.com
   api, // optional { host, port, protocol } to point the Stripe client at a stand-in (development)
   identify, // (sessionToken) => { subject } | null
+  store = memoryStore(),
   now = () => Date.now(),
   log = console.error,
 }) {
   const stripe = new Stripe(secretKey, { ...(api ?? {}), maxNetworkRetries: 0, timeout: 10_000 });
-  const orders = new Map(); // id -> order
+  const orders = store.map("orders"); // id -> order
+  const save = (order) => orders.set(order.id, order);
   const seenEvents = new Set();
   const paidHooks = [];
 
@@ -55,7 +61,7 @@ export function createPayments({
       id: "ord_" + randomBytes(12).toString("base64url"),
       owner, currency, items: items.map((i) => ({ ...i })), total_minor: total,
       status: "created", // created -> pending (session made) -> paid | failed | expired
-      sessionIds: [], intentIds: [], paidSessionId: null, attempts: 0, createdAt: now(), paidAt: null,
+      sessionIds: [], intentIds: [], paidSessionId: null, attempts: 0, createdAt: now(), paidAt: null, fulfilled: false,
     };
     orders.set(order.id, order);
     return order;
@@ -136,6 +142,7 @@ export function createPayments({
         }
         if (!order.intentIds.includes(intent.id)) order.intentIds.push(intent.id);
         if (order.status === "created") order.status = "pending";
+        save(order);
         return reply(res, 200, {
           handler: "stripe-card",
           reference: intent.id,
@@ -173,6 +180,7 @@ export function createPayments({
       // Every session we ever made for this order stays acceptable: the user may pay on an earlier one.
       if (!order.sessionIds.includes(session.id)) order.sessionIds.push(session.id);
       if (order.status === "created") order.status = "pending";
+      save(order);
 
       reply(res, 200, {
         handler: "stripe",
@@ -236,7 +244,32 @@ export function createPayments({
 
   const ack = (res, status = 200, body = { received: true }) => reply(res, status, body);
 
+  /** Run the hooks, and record that they all succeeded. One that failed runs again at the next recover(). */
+  async function fulfil(order) {
+    let ok = true;
+    for (const fn of paidHooks) {
+      try { await fn({ ...order }); } catch (e) { ok = false; log(`payments: fulfilment hook failed for ${order.id}: ${e.message}`); }
+    }
+    if (!ok) return;
+    order.fulfilled = true;
+    save(order);
+  }
+
+  /** The order is paid. Saved first: if that fails the order is unchanged, the webhook gets a 500, and the processor retries. */
+  async function markPaid(order, reference) {
+    const before = { status: order.status, paidSessionId: order.paidSessionId, paidAt: order.paidAt };
+    Object.assign(order, { status: "paid", paidSessionId: reference, paidAt: now() });
+    try { save(order); } catch (e) { Object.assign(order, before); throw e; }
+    await fulfil(order);
+  }
+
+  /** Finish fulfilling orders a crash or a failed hook left paid but not fulfilled. Call once the hooks are registered. */
+  async function recover() {
+    for (const order of orders.values()) if (order.status === "paid" && !order.fulfilled) await fulfil(order);
+  }
+
   async function webhookEndpoint(req, res) {
+    let event;
     try {
       if (req.method !== "POST") return ack(res, 405, { error: "POST only" });
       const raw = await readBody(req, MAX_WEBHOOK);
@@ -244,7 +277,6 @@ export function createPayments({
       const signature = req.headers["stripe-signature"];
       if (typeof signature !== "string") return ack(res, 400, { error: "missing signature" });
 
-      let event;
       try {
         // Over the exact bytes received, with Stripe's five-minute timestamp tolerance.
         event = stripe.webhooks.constructEvent(raw, signature, webhookSecret, 300);
@@ -277,7 +309,7 @@ export function createPayments({
         if (!io) { log(`payments webhook: ${event.type} for an unknown order`); return ack(res); }
         if (!io.intentIds.includes(intent.id)) { log(`payments webhook: intent ${intent.id} is not one of ${io.id}'s`); return ack(res); }
         if (event.type === "payment_intent.payment_failed") {
-          if (io.status !== "paid") io.status = "failed"; // `paid` is terminal
+          if (io.status !== "paid") { io.status = "failed"; save(io); } // `paid` is terminal
           return ack(res);
         }
         if (intent.amount !== io.total_minor || intent.amount_received !== io.total_minor || String(intent.currency).toLowerCase() !== io.currency.toLowerCase()) {
@@ -289,12 +321,7 @@ export function createPayments({
           if (intent.id !== io.paidSessionId) log(`payments: ${io.id} was paid twice (${io.paidSessionId} and ${intent.id}); one needs a refund`);
           return ack(res);
         }
-        io.status = "paid";
-        io.paidSessionId = intent.id;
-        io.paidAt = now();
-        for (const fn of paidHooks) {
-          try { await fn({ ...io }); } catch (e) { log(`payments: fulfilment hook failed for ${io.id}: ${e.message}`); }
-        }
+        await markPaid(io, intent.id);
         return ack(res);
       }
 
@@ -314,27 +341,26 @@ export function createPayments({
             if (session.id !== order.paidSessionId) log(`payments: ${order.id} was paid twice (sessions ${order.paidSessionId} and ${session.id}); one needs a refund`);
             return ack(res);
           }
-          order.status = "paid";
-          order.paidSessionId = session.id;
-          order.paidAt = now();
-          for (const fn of paidHooks) {
-            try { await fn({ ...order }); } catch (e) { log(`payments: fulfilment hook failed for ${order.id}: ${e.message}`); }
-          }
+          await markPaid(order, session.id);
           return ack(res);
         }
         case "checkout.session.async_payment_failed":
         case "checkout.session.expired":
           // `paid` is terminal: a late failure or expiry never undoes it.
-          if (order && order.sessionIds.includes(session.id) && order.status !== "paid") order.status = event.type.endsWith("expired") ? "expired" : "failed";
+          if (order && order.sessionIds.includes(session.id) && order.status !== "paid") {
+            order.status = event.type.endsWith("expired") ? "expired" : "failed";
+            save(order);
+          }
           return ack(res);
         default:
           return ack(res); // not an event we use; acknowledge so the processor does not retry
       }
     } catch (e) {
+      if (event) seenEvents.delete(event.id); // not handled: the processor's retry must not look like a duplicate
       log(`payments webhook: ${e.stack ?? e}`);
       ack(res, 500, { error: "internal" });
     }
   }
 
-  return { createOrder, getOwned, sessionsEndpoint, confirmEndpoint, webhookEndpoint, onPaid: (fn) => void paidHooks.push(fn), orders, stripe };
+  return { createOrder, getOwned, sessionsEndpoint, confirmEndpoint, webhookEndpoint, onPaid: (fn) => void paidHooks.push(fn), recover, orders, stripe };
 }

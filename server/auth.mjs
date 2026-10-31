@@ -5,9 +5,10 @@
 //   - an HTTP handler for the manifest's auth.token_endpoint (grants: oidc, revoke)
 //   - identify(token) to find out who a session token belongs to
 //
-// Sessions, users and challenges are in memory. A real origin would persist them.
+// Sessions and users live in the store it is given, sessions under a hash of the token, so the file does not hold usable
+// tokens. Challenges last minutes and stay in memory: a restart means starting that one ceremony again.
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
   generateRegistrationOptions,
@@ -16,6 +17,7 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import { ApiError, sessionHeader } from "./rpc.mjs";
+import { memoryStore } from "./store.mjs";
 
 const CALLBACK_PATH = "/_navigator/auth/callback";
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -35,6 +37,7 @@ export function defaultOriginAllowed(rpId) {
 }
 
 const newToken = () => randomBytes(32).toString("base64url");
+const tokenKey = (token) => createHash("sha256").update(token).digest("base64url");
 
 export function createAuth({
   rpId,
@@ -43,12 +46,14 @@ export function createAuth({
   oidc = [], // [{ issuer, clientId, clientSecret? }]
   allowInsecureIssuers = false, // development only: permit http://localhost IdPs
   sessionTtlSec = 3600,
+  store = memoryStore(),
   now = () => Date.now(),
   log = console.error,
 }) {
-  const sessions = new Map(); // token -> { subject, name, expires (unix s) }
-  const users = new Map(); // subject -> { name, credentials: [...], oidcKey? }
-  const oidcIndex = new Map(); // `${iss}\n${sub}` -> subject
+  const sessions = store.map("sessions"); // tokenKey(token) -> { subject, name, expires (unix s) }
+  const users = store.map("users"); // subject -> { name, credentials: [...], oidcKey? }
+  const oidcIndex = store.map("oidc"); // `${iss}\n${sub}` -> subject
+  for (const [k, s] of sessions) if (s.expires <= Math.floor(now() / 1000)) sessions.delete(k); // expired while stopped
   const challenges = new Map(); // challenge -> { kind, name?, expires (ms) }
   const providers = new Map(oidc.map((p) => [p.issuer, p]));
   const discovery = new Map(); // issuer -> { doc, jwks }
@@ -58,17 +63,18 @@ export function createAuth({
   function issueSession(subject, name) {
     const expires = Math.floor(now() / 1000) + sessionTtlSec;
     const token = newToken();
-    sessions.set(token, { subject, name, expires });
+    sessions.set(tokenKey(token), { subject, name, expires });
     return { token, subject, name, expires };
   }
 
   /** Who a session token belongs to, or null (anonymous, unknown, revoked, or expired). */
   function identify(token) {
     if (!token) return null;
-    const s = sessions.get(token);
+    const key = tokenKey(token);
+    const s = sessions.get(key);
     if (!s) return null;
     if (s.expires <= Math.floor(now() / 1000)) {
-      sessions.delete(token);
+      sessions.delete(key);
       return null;
     }
     return { subject: s.subject, name: s.name };
@@ -180,6 +186,7 @@ export function createAuth({
       }
       if (!result.verified) throw failed();
       cred.counter = result.authenticationInfo.newCounter;
+      users.set(owner.subject, owner.user); // the counter is what catches a cloned authenticator
       ctx.setSession(issueSession(owner.subject, owner.user.name));
       return { name: owner.user.name };
     },
@@ -269,8 +276,8 @@ export function createAuth({
     const name = String(claims.name ?? claims.preferred_username ?? claims.email ?? "Account").slice(0, 80);
     if (!subject) {
       subject = "u_" + randomBytes(12).toString("base64url");
-      oidcIndex.set(key, subject);
       users.set(subject, { name, credentials: [], oidcKey: key });
+      oidcIndex.set(key, subject);
     }
     const session = issueSession(subject, users.get(subject).name);
     reply(res, 200, {}, { "Lattice-Set-Session": sessionHeader(session) });
@@ -303,7 +310,7 @@ export function createAuth({
       if (body.grant === "oidc") return await oidcSignIn(body, res);
       if (body.grant === "revoke") {
         const token = req.headers["lattice-session"];
-        if (typeof token === "string") sessions.delete(token);
+        if (typeof token === "string") sessions.delete(tokenKey(token));
         return reply(res, 200, {}, { "Lattice-Clear-Session": "1" });
       }
       reply(res, 400, { code: "invalid_request", message: "unknown grant" });

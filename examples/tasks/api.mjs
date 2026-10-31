@@ -1,4 +1,5 @@
-// Server-side handlers for the Tasks API (see api.json). State is in memory.
+// Server-side handlers for the Tasks API (see api.json). State lives in the store the server was started with, except
+// anonymous tasks: anyone can mint an anonymous token, so those stay in memory, where they cannot fill the disk.
 //
 // Tasks belong to whoever the session token resolves to: a signed-in user (passkey or OIDC), or,
 // before sign-in, the anonymous token the host generated. Signing in does not migrate anonymous
@@ -13,10 +14,11 @@ const MAX_TASKS = 50;
 const MAX_TASKS_PRO = 200;
 const PRO_PRICE = { currency: "USD", amount_minor: 400, label: "Lattice Tasks Pro" };
 
-export async function setup({ manifest, oidc, dev, stripe, log }) {
-  const auth = createAuth({ rpId: manifest.app, rpName: manifest.name ?? manifest.app, oidc, allowInsecureIssuers: dev, log });
-  const accounts = new Map(); // "user:<subject>" | "anon:<token>" -> { tasks, nextId }
-  const pro = new Set(); // subjects with Pro: granted only by a verified payment webhook
+export async function setup({ manifest, oidc, dev, stripe, log, store }) {
+  const auth = createAuth({ rpId: manifest.app, rpName: manifest.name ?? manifest.app, oidc, allowInsecureIssuers: dev, log, store });
+  const accounts = store.map("tasks"); // subject -> { tasks, nextId }
+  const anonymous = new Map(); // token -> { tasks, nextId }
+  const pro = store.set("pro"); // subjects with Pro: granted only by a verified payment webhook
 
   // Payments are optional: without a processor key the app still runs and says so when asked to buy.
   let payments = null;
@@ -29,18 +31,20 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
       publishableKey: stripe.publishableKey, // offers the host-drawn card sheet when set
       processorApi: stripe.processorApi,
       identify: (token) => auth.identify(token),
+      store,
       log,
     });
     payments.onPaid((order) => pro.add(order.owner)); // the only place Pro is granted
+    await payments.recover();
   }
 
+  /** The caller's tasks, and how to save them after a change. */
   function account(ctx) {
     if (!ctx.session) throw new ApiError("unauthorized", "No session. Is the session capability granted?");
     const who = auth.identify(ctx.session);
-    const key = who ? `user:${who.subject}` : `anon:${ctx.session}`;
-    let a = accounts.get(key);
-    if (!a) accounts.set(key, (a = { tasks: [], nextId: 1 }));
-    return a;
+    const [where, key] = who ? [accounts, who.subject] : [anonymous, ctx.session];
+    const a = where.get(key) ?? { tasks: [], nextId: 1 };
+    return { a, save: () => where.set(key, a) };
   }
 
   const find = (a, id) => {
@@ -51,11 +55,11 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
 
   const handlers = {
     async list_tasks(_req, ctx) {
-      return { tasks: account(ctx).tasks.map((t) => ({ ...t })) };
+      return { tasks: account(ctx).a.tasks.map((t) => ({ ...t })) };
     },
 
     async add_task({ title }, ctx) {
-      const a = account(ctx);
+      const { a, save } = account(ctx);
       const who = auth.identify(ctx.session);
       const trimmed = title.trim();
       if (!trimmed) throw new ApiError("title_blank", "Enter something to do first.");
@@ -63,19 +67,23 @@ export async function setup({ manifest, oidc, dev, stripe, log }) {
       if (a.tasks.length >= limit) throw new ApiError("too_many_tasks", `You can have at most ${limit} tasks.`);
       const task = { id: a.nextId++, title: trimmed, done: false };
       a.tasks.push(task);
+      save();
       return { task: { ...task } };
     },
 
     async set_done({ id, done }, ctx) {
-      const t = find(account(ctx), id);
+      const { a, save } = account(ctx);
+      const t = find(a, id);
       t.done = done;
+      save();
       return { task: { ...t } };
     },
 
     async delete_task({ id }, ctx) {
-      const a = account(ctx);
+      const { a, save } = account(ctx);
       find(a, id);
       a.tasks = a.tasks.filter((t) => t.id !== id);
+      save();
       return {};
     },
 
