@@ -1,0 +1,17 @@
+[package]
+name = "surface"
+version = "0.1.0"
+edition = "2021"
+description = "Lattice reference app: an animated plasma the app paints itself, shown through a pixel surface."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

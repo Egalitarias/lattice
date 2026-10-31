@@ -54,6 +54,25 @@ interface experiments {
     lookup: func(name: string) -> result<string, host-error>;
 }
 
+/// Capability: gpu.surface (see capabilities.md). A rectangle of pixels the app paints and the host shows in a `canvas` node.
+/// The app renders in its own memory, in the sandbox, and hands over whole frames; it never touches the display, and the
+/// host decides how often a frame is shown. This is not a GPU command interface.
+interface surface {
+    use types.{host-error};
+
+    /// A surface of `width` x `height` pixels (each 1 to 1024, at most 786432 pixels in all). Fails with `invalid-argument`
+    /// for a size outside that, and `rate-limited` when the app already holds 2 surfaces. Name it in `canvas.surface`.
+    create: func(width: u32, height: u32) -> result<string, host-error>;
+
+    /// Replace the surface's pixels. `pixels` is exactly width x height x 4 bytes: RGBA, 8 bits each, rows from the top,
+    /// straight (not premultiplied) alpha. Fails with `invalid-argument` for an unknown surface or the wrong length, and
+    /// `rate-limited` past about 30 frames a second. The host shows the newest frame it has when it next draws.
+    present: func(handle: string, pixels: list<u8>) -> result<_, host-error>;
+
+    /// Let go of the surface. A canvas that still names it makes the scene invalid.
+    destroy: func(handle: string);
+}
+
 /// Capability: storage.local (and storage.sync, which replicates the same namespace)
 interface storage {
     use types.{host-error};

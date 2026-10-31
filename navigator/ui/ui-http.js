@@ -25,4 +25,9 @@ mountUi({
     return () => handlers.delete(handler);
   },
   state: () => fetch("/_navigator/state").then((r) => r.json()),
+  async surface(handle) {
+    const res = await fetch(`/_navigator/surface/${encodeURIComponent(handle)}`);
+    if (!res.ok) return null;
+    return { width: Number(res.headers.get("x-width")), height: Number(res.headers.get("x-height")), seq: Number(res.headers.get("x-seq")), pixels: new Uint8ClampedArray(await res.arrayBuffer()) };
+  },
 });

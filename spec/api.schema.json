@@ -61,6 +61,11 @@
       "additionalProperties": false,
       "properties": {
         "description": { "type": "string", "maxLength": 300 },
+        "delivery": {
+          "description": "'reliable' (default): every message, in order, on the subscription's stream. 'datagram': for fast-moving state that the server republishes often; each message travels as an unreliable, unordered WebTransport datagram when it fits in one (and on the stream when it does not, or when the client has no WebTransport), and the host delivers only the newest. See rpc.md.",
+          "enum": ["reliable", "datagram"],
+          "default": "reliable"
+        },
         "message": { "description": "Schema of every message on this topic. The host validates each one before the app sees it.", "$ref": "#/$defs/bodySchema" }
       }
     },

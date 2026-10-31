@@ -104,6 +104,26 @@ The certificate must chain to a trusted root. For development only, a host on a 
 enforce for pinned certificates); every other host ignores it. A pinned connection whose certificate does not match
 fails, and the host falls back to HTTPS.
 
+**Datagram topics (`"delivery": "datagram"`).** For state that moves constantly and that the server republishes often
+(positions, a pointer, a physics tick), a topic may ask for unreliable delivery. It changes the transport, not what the
+app sees: the app still receives validated messages, one at a time, newest state.
+
+- **Server.** A message goes out as one WebTransport datagram, `{"topic": "...", "seq": n, "payload": {...}}` (UTF-8 JSON),
+  if the subscriber's session has datagrams and the frame fits in one (`maxDatagramSize`; about 1.1 KB). Otherwise, and
+  always for the first message (the snapshot), it goes on the subscription's stream as a frame, as for any topic. `seq`
+  is one counter per subscription, shared by both paths. A datagram that finds the connection busy is dropped, not queued:
+  the next message supersedes it. Datagrams are sent only to sessions that hold an authorised subscription to the topic.
+- **Host.** Reads the session's datagrams and delivers one only if the topic is declared `datagram`, the app is subscribed
+  to it over this session, `seq` is an integer greater than the last it delivered on this subscription, and the payload
+  passes the topic's schema. Anything else is refused and counted (`seq` behind the newest is "stale", not an error). A
+  datagram is at most 1500 bytes. The counter restarts at 1 whenever the subscription's stream is opened again.
+  Over streaming HTTPS there are no datagrams: every message arrives on the stream, and the same rule drops one that is behind
+  a newer one.
+- **The app.** Must treat a datagram topic as a feed of state, not events: a message may be lost, and the server should
+  keep republishing (a tick, not "on change"), so a loss is repaired by the next. Do not use it for anything that must arrive.
+- **Not a security boundary.** A datagram is not authenticated on its own; it is trusted because it arrives on the
+  WebTransport session the host opened to the manifest's `api.stream` endpoint (TLS/QUIC), like the stream frames.
+
 **Host duties.** The host refuses topics the description does not declare, allows at most 8 subscriptions per app,
 validates each message (dropping and counting any that fail), caps a line at 1 MiB, re-connects with exponential
 back-off (1 s to 30 s) and does not retry after a `4xx` other than `408`/`429`. It delivers messages to the app one
@@ -117,7 +137,7 @@ queued). A message goes only to subscribers allowed to see it.
 
 ## Not specified yet
 
-- WebTransport datagrams (unreliable, unordered updates for fast-moving state), resumable streams, per-topic
+- Client-to-server datagrams, resumable streams, per-topic
   parameters, and sending from the client over a stream (calls remain RPC).
 - Cross-origin API endpoints and their capability.
 - Byte strings and non-string keys in bodies (the validated data model is JSON).

@@ -197,7 +197,7 @@ function shell(n) {
       return { el: h("div", { class: "placeholder" }, p.label) };
     }
     case "canvas": {
-      if (!p.drawing) {
+      if (!p.drawing && !p.surface) {
         const el = h("div", { class: "placeholder", role: "img", "aria-label": p.label });
         el.append(h("span", {}, p.description));
         return { el };
@@ -272,25 +272,71 @@ function paint(canvas, d) {
 
 const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
 
+/** handle -> () => void; called when the host has a new frame for that surface. */
+const surfaceListeners = new Map();
+
 function canvasEl(n) {
   let p = n.props;
+  const size = () => p.surface ?? p.drawing; // { width, height } in the units the app draws and points in
   const wrap = h("div", { class: "canvas-wrap" });
   const canvas = h("canvas", { class: "scene-canvas", "aria-label": p.label, role: p.onInput ? "application" : "img", "aria-roledescription": p.onInput ? "interactive drawing" : undefined });
-  canvas.style.aspectRatio = `${p.drawing.width} / ${p.drawing.height}`;
+  canvas.style.aspectRatio = `${size().width} / ${size().height}`;
   const descId = `cv${n.id}-d`;
   canvas.setAttribute("aria-describedby", descId);
   wrap.append(canvas, h("span", { class: "sr-only", id: descId }, p.description));
   const desc = wrap.querySelector(".sr-only");
-  const draw = () => paint(canvas, p.drawing);
-  requestAnimationFrame(draw);
-  if (typeof ResizeObserver !== "undefined") new ResizeObserver(draw).observe(canvas);
-  matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", draw);
+  // A surface: the app's own pixels. The host says when there is a new frame, the window fetches it and puts it on the canvas,
+  // and asks for the next one once it has drawn this one (so the app is never ahead of what can be shown).
+  let handle = null;
+  let lastSeq = -1;
+  let fetching = false;
+  let again = false;
+  const pull = async () => {
+    if (fetching) return void (again = true);
+    fetching = true;
+    try {
+      do {
+        again = false;
+        const f = await transport.surface?.(handle);
+        if (!f || f.seq === lastSeq || f.pixels.length !== f.width * f.height * 4) continue;
+        lastSeq = f.seq;
+        if (canvas.width !== f.width || canvas.height !== f.height) { canvas.width = f.width; canvas.height = f.height; }
+        canvas.getContext("2d").putImageData(new ImageData(f.pixels, f.width, f.height), 0, 0);
+      } while (again);
+    } finally {
+      fetching = false;
+    }
+  };
+  let asking = false;
+  const ask = () => {
+    if (!canvas.isConnected) return stopSurface(); // the element went away
+    if (!handle) return; // no longer a surface
+    if (!asking) {
+      asking = true;
+      transport.post("frame", { handle }).finally(() => { asking = false; });
+    }
+    requestAnimationFrame(ask); // only runs while the page is visible
+  };
+  const stopSurface = () => { if (handle) surfaceListeners.delete(handle); handle = null; };
+  const useSurface = () => {
+    const next = p.surface?.handle ?? null;
+    if (next === handle) return;
+    const started = handle === null;
+    stopSurface();
+    handle = next;
+    lastSeq = -1;
+    if (handle) { surfaceListeners.set(handle, pull); pull(); if (started) requestAnimationFrame(ask); }
+  };
+  const draw = () => (p.surface ? pull() : paint(canvas, p.drawing));
+  requestAnimationFrame(() => { useSurface(); draw(); });
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => { if (!p.surface) draw(); }).observe(canvas);
+  matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (!p.surface) draw(); });
   if (p.onInput) {
     canvas.tabIndex = 0;
     canvas.addEventListener("pointerdown", (e) => {
       const r = canvas.getBoundingClientRect();
-      const x = ((e.clientX - r.left) / r.width) * p.drawing.width;
-      const y = ((e.clientY - r.top) / r.height) * p.drawing.height;
+      const x = ((e.clientX - r.left) / r.width) * size().width;
+      const y = ((e.clientY - r.top) / r.height) * size().height;
       canvas.focus();
       act(n.id, "input", { kind: "pointer", x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 });
     });
@@ -304,8 +350,9 @@ function canvasEl(n) {
   const update = (next) => {
     p = next.props;
     canvas.setAttribute("aria-label", p.label);
-    canvas.style.aspectRatio = `${p.drawing.width} / ${p.drawing.height}`;
+    canvas.style.aspectRatio = `${size().width} / ${size().height}`;
     desc.textContent = p.description;
+    useSurface();
     draw();
   };
   return { el: wrap, update };
@@ -324,7 +371,7 @@ function reconcile(parent, nodes, seen) {
   const desired = nodes.map((n) => {
     seen.add(n.id);
     let entry = live.get(n.id);
-    const reusable = entry && entry.update && entry.type === n.type && entry.input === !!n.props.onInput && n.props.drawing;
+    const reusable = entry && entry.update && entry.type === n.type && entry.input === !!n.props.onInput && (n.props.drawing || n.props.surface);
     if (entry && entry.rev !== n.rev && reusable) {
       entry.update(n);
       entry.rev = n.rev;
@@ -691,6 +738,7 @@ export function mountUi(t) {
     else if (msg.kind === "chrome") renderChrome(msg.chrome);
     else if (msg.kind === "prompt") showAuth(msg.prompt);
     else if (msg.kind === "prompt-end") closeAuth(msg.id);
+    else if (msg.kind === "surface") surfaceListeners.get(msg.handle)?.();
   });
   addEventListener("popstate", () => navigate(location.pathname + location.search, { push: false }));
 }

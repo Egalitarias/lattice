@@ -13,6 +13,7 @@ const RETRYABLE = new Set([408, 429]);
 // Errors a WebTransport stream reports in its first line; like HTTP statuses, only these mean "try again".
 const RETRYABLE_CODES = new Set(["rate_limited", "internal"]);
 const WT_RETRY_AFTER_MS = 60_000;
+const MAX_DATAGRAM = 1500;
 const utf8 = new TextEncoder();
 
 /** A ReadableStream as an async iterable of chunks (not every engine makes streams iterable). */
@@ -50,7 +51,10 @@ export class StreamClient {
     Object.assign(this, { apiHash, session, onMessage, onProblem, backoffMs, fetchImpl, webTransport, wtConnectMs });
     this.endpoint = endpoint.replace(/\/$/, "");
     this.topics = new Map(Object.entries(description.topics ?? {}).map(([name, t]) => [name, new Schema(t.message)]));
+    this.datagramTopics = new Set(Object.entries(description.topics ?? {}).filter(([, t]) => t.delivery === "datagram").map(([name]) => name));
     this.dropped = 0;
+    /** What happened to datagrams, for tests and diagnostics: delivered, behind a newer message, or refused. */
+    this.datagrams = { delivered: 0, stale: 0, refused: 0 };
   }
 
   /** Result in the shape of a host call: { ok: true, bytes } or { ok: false, error: <host-error> }. */
@@ -59,7 +63,7 @@ export class StreamClient {
     if (!this.topics.has(topic)) return hostErr("invalid-argument", `unknown topic "${topic}"`);
     if (this.#subs.has(topic)) return { ok: true, bytes: new Uint8Array() };
     if (this.#subs.size >= MAX_SUBSCRIPTIONS) return hostErr("rate-limited");
-    const sub = { abort: new AbortController() };
+    const sub = { abort: new AbortController(), lastSeq: 0 };
     this.#subs.set(topic, sub);
     void this.#run(topic, sub);
     return { ok: true, bytes: new Uint8Array() };
@@ -88,11 +92,46 @@ export class StreamClient {
       const timeout = new Promise((_, rej) => setTimeout(() => { rej(new Error("timed out connecting")); t.close?.(); }, this.wtConnectMs).unref?.());
       const p = Promise.race([t.ready.then(() => t), timeout]);
       this.#wt = p;
+      if (this.datagramTopics.size) p.then((s) => this.#readDatagrams(s), () => {});
       const gone = () => { if (this.#wt === p) this.#wt = null; };
       t.closed.then(gone, gone);
       p.catch(gone);
     }
     return this.#wt;
+  }
+
+  /** Datagrams from the server on the shared session: each names its topic, and only the newest message of a topic is used. */
+  async #readDatagrams(session) {
+    if (!session.datagrams?.readable) return;
+    for await (const bytes of chunksOf(session.datagrams.readable)) {
+      if (this.#wt === null || this.#closed) return;
+      this.#datagram(bytes);
+    }
+  }
+
+  #datagram(bytes) {
+    const refuse = () => void this.datagrams.refused++;
+    if (!(bytes instanceof Uint8Array) || bytes.length > MAX_DATAGRAM) return refuse();
+    let frame;
+    try {
+      frame = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return refuse();
+    }
+    const topic = frame?.topic;
+    const sub = typeof topic === "string" ? this.#subs.get(topic) : undefined;
+    // Only a topic that was declared as a datagram topic, that the app is subscribed to, over this transport.
+    if (!sub || !this.datagramTopics.has(topic) || this.transports.get(topic) !== "webtransport" || !Number.isSafeInteger(frame.seq) || frame.seq < 1 || !("payload" in frame)) return refuse();
+    if (frame.seq <= sub.lastSeq) return void this.datagrams.stale++;
+    const problem = this.topics.get(topic).check(frame.payload);
+    if (problem) {
+      this.dropped++;
+      this.onProblem(topic, `dropped a datagram that violates the API description: ${problem}`);
+      return refuse();
+    }
+    sub.lastSeq = frame.seq;
+    this.datagrams.delivered++;
+    this.onMessage(topic, encode(frame.payload));
   }
 
   /** Open a subscription stream on the shared session; resolves to an async iterable of chunks. */
@@ -135,6 +174,7 @@ export class StreamClient {
             continue;
           }
           this.transports.set(topic, "webtransport");
+          sub.lastSeq = 0; // a new stream numbers its messages from 1 again
           opened = true;
           if ((await this.#read(topic, chunks, sub, true)) === "refused") {
             this.#subs.delete(topic);
@@ -144,6 +184,7 @@ export class StreamClient {
           throw new Error("stream ended");
         }
         this.transports.set(topic, "https");
+        sub.lastSeq = 0;
         const headers = { Accept: "application/x-ndjson", "Lattice-Api": this.apiHash };
         if (this.session) headers["Lattice-Session"] = this.session.token();
         const res = await this.fetchImpl(`${this.endpoint}/_topics/${topic}`, { headers, redirect: "error", credentials: "omit", signal: sub.abort.signal });
@@ -193,7 +234,7 @@ export class StreamClient {
             return "refused";
           }
         }
-        this.#frame(topic, schema, line);
+        this.#frame(topic, schema, line, sub);
       }
       if (buf.length > MAX_LINE) throw new Error("frame too large");
     }
@@ -210,7 +251,7 @@ export class StreamClient {
     }
   }
 
-  #frame(topic, schema, line) {
+  #frame(topic, schema, line, sub) {
     if (line.length > MAX_LINE) return void this.dropped++;
     let frame;
     try {
@@ -223,6 +264,11 @@ export class StreamClient {
     if (problem) {
       this.dropped++;
       return void this.onProblem(topic, `dropped a message that violates the API description: ${problem}`);
+    }
+    // On a datagram topic a message that a datagram already outran is old news.
+    if (this.datagramTopics.has(topic) && Number.isSafeInteger(frame.seq)) {
+      if (frame.seq <= sub.lastSeq) return void this.datagrams.stale++;
+      sub.lastSeq = frame.seq;
     }
     this.onMessage(topic, encode(frame.payload));
   }

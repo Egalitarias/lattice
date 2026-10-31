@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "start": "node navigator.mjs",
-    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs test/analytics.test.mjs test/schema.test.mjs test/browser-build.test.mjs test/stream.test.mjs test/canvas.test.mjs test/webtransport.test.mjs test/experiments.test.mjs test/cardsheet.test.mjs test/persistence.test.mjs",
+    "test": "node --test test/e2e.test.mjs test/rpc.test.mjs test/auth.test.mjs test/payments.test.mjs test/analytics.test.mjs test/schema.test.mjs test/browser-build.test.mjs test/stream.test.mjs test/canvas.test.mjs test/webtransport.test.mjs test/experiments.test.mjs test/cardsheet.test.mjs test/persistence.test.mjs test/surface.test.mjs",
     "build:browser": "node browser/build.mjs"
   },
   "dependencies": {

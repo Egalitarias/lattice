@@ -19,10 +19,10 @@ is unavailable. Names here are the exact strings accepted by `manifest.schema.js
 | Capability | Purpose | Rendering | Prompt |
 |---|---|---|---|
 | `net.origin` | Typed RPC (`rpc.md`) to the app's own origin, at the manifest `api` endpoint | data | none |
-| `net.realtime` | WebTransport streams and datagrams to declared endpoints | data | none |
+| `net.realtime` | Topics from the app's server, over WebTransport streams and datagrams or streaming HTTPS (`rpc.md`) | data | none |
 | `storage.local` | Origin-partitioned key-value and blob storage on the device | data | none |
 | `storage.sync` | `storage.local` replicated across the user's devices (end-to-end encrypted) | data | on use |
-| `gpu.surface` | Handle to a GPU surface for `Canvas` nodes (an app-painted pixel surface; not implemented). A `Canvas` can also carry a `drawing`, a display list of shapes the host paints, which needs no capability | host UI | none |
+| `gpu.surface` | A pixel surface the app paints (RGBA frames) and a `Canvas` node shows. The app renders in the sandbox and the host composites the frame; it is not a GPU command interface (`wit/capabilities.wit`, `surface`). A `Canvas` can also carry a `drawing`, a display list of shapes the host paints, which needs no capability | host UI | none |
 
 ## Identity and session
 

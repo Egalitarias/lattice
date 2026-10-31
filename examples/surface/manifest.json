@@ -1,0 +1,12 @@
+{
+  "lattice": "0.1",
+  "app": "surface.localhost",
+  "name": "Lattice Plasma",
+  "description": "Reference app: an animation the app paints pixel by pixel into a surface the host shows (gpu.surface).",
+  "version": "0.1.0",
+  "lang": "en",
+  "entry": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "routes": { "/": "Home" },
+  "capabilities": { "requires": ["gpu.surface"] },
+  "fallback": { "html": "/" }
+}

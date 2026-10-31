@@ -63,6 +63,8 @@ export class SceneStore {
   title = "";
   lang = undefined;
   live = undefined;
+  /** The app's Surfaces, which say whether a canvas's surface handle is real. */
+  surfaces = null;
   root = undefined;
 
   load(scene) {
@@ -109,7 +111,7 @@ export class SceneStore {
       }
     }
     const next = new SceneStore();
-    Object.assign(next, { title, lang, live, root });
+    Object.assign(next, { title, lang, live, root, surfaces: this.surfaces });
     next.#nodes = nodes;
     next.#rev = rev;
     const tree = next.tree(); // throws if the result is invalid
@@ -160,7 +162,10 @@ export class SceneStore {
         if (v.level < 1 || v.level > 6) throw new SceneError(`heading ${n.id} level must be 1-6`);
         break;
       case "canvas":
+        if (v.drawing && v.surface) throw new SceneError(`canvas ${n.id} has a drawing or a surface, not both`);
         if (v.drawing) checkDrawing(n.id, v.drawing);
+        // A surface is one this app created and still holds: a handle is not a name the app can guess or borrow.
+        if (v.surface && !this.surfaces?.info(v.surface)) throw new SceneError(`canvas ${n.id}: no such surface`);
         break;
       case "table":
         for (const row of v.rows) {
@@ -192,6 +197,7 @@ export class SceneStore {
       else if (k === "rows") out.rows = val.map((r) => r.map(scalar));
       else if (k === "props") out.props = argsObject(val);
       else if (k === "drawing") out.drawing = val; // already validated by checkDrawing; plain data
+      else if (k === "surface") out.surface = { handle: val, ...this.surfaces.info(val) }; // validated by #check; the window fetches frames by handle
       else if (typeof val === "bigint") out[k] = Number(val);
       else out[k] = val;
     }

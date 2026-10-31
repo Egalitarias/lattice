@@ -47,7 +47,8 @@ requested and the user allowed, so a component that imports `payments` without
 | `notifications` | `notifications` |
 | `consent` | `consent` |
 | `navigate.external` | `navigation.open-external` |
-| `ads.slot`, `gpu.surface`, `embed.*` | no import; enforced on the scene (`ad-slot`, `canvas.surface`, `embed` nodes) |
+| `gpu.surface` | `surface` (create, present, destroy; and the `canvas.surface` it names) |
+| `ads.slot`, `embed.*` | no import; enforced on the scene (`ad-slot`, `embed` nodes) |
 | `experiments`, `share`, `files.pick`, `contacts.pick`, `identity.age_over`, `camera`, `microphone`, `location` | not yet specified (see below) |
 
 Revocation: when a user revokes a capability, the host sends `host-event.capability-revoked` and
@@ -102,7 +103,7 @@ Violations reject the call with `app-error.invalid`:
   component on its own thread and blocks it on a shared buffer while the main thread does the I/O, so the host
   stays responsive and a hung component can be killed. Move to WASI 0.3 native async when stable; the interfaces
   are written so that change is mechanical.
-- `gpu.surface`: the `canvas` node carries a surface name, but the drawing API (likely wasi-gfx) is open.
+- `gpu.surface` is a pixel surface the app paints on the CPU, inside the sandbox. A GPU command interface (wasi-gfx / WebGPU from a component) is open: it needs command validation, resource limits and a story for shaders that this version does not attempt.
 - `share`, `files.pick`, `contacts.pick`, `identity.age_over`, `camera`, `microphone`, `location`, `experiments`.
 - State snapshot and restore across suspend.
 - A size limit on `scene` and `update` per call, and a rate limit on updates.

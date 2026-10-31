@@ -5,6 +5,7 @@ import { SceneStore, SceneError, toArgs } from "./scene.mjs";
 import { AppHost, HostCrash, LinkFailure } from "./apphost.mjs";
 import { RpcClient, SessionStore } from "./rpc.mjs";
 import { StreamClient } from "./stream.mjs";
+import { Surfaces } from "./surface.mjs";
 import { AuthBroker } from "./auth.mjs";
 import { PaymentBroker } from "./payments.mjs";
 import { Prompts } from "./prompts.mjs";
@@ -81,6 +82,7 @@ export class Session {
     this.routes = compileRoutes(manifest.routes);
     this.origin = origin;
     this.log = log;
+    this.store.surfaces = host.surfaces;
   }
 
   #lastInput = new Map();
@@ -233,7 +235,7 @@ export class Session {
           if (e instanceof SceneError) throw new HttpError(500, `The app returned an invalid update: ${e.message}`);
           throw e;
         }
-        return { focus: update.focus };
+        return { focus: update.focus, changed: update.ops.length > 0 };
       })
     );
   }
@@ -252,6 +254,7 @@ export class Session {
 const defaultLogger = () => {};
 const MAX_PUSHED_QUEUE = 64;
 const MIN_INPUT_GAP_MS = 25;
+const MIN_FRAME_GAP_MS = 1000 / 30;
 const CANVAS_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
 
 /** What a canvas may send the app: a pointer position in drawing units, or one of a few keys. Anything else is refused. */
@@ -352,6 +355,9 @@ export class Controller {
 
     this.experiments = granted.has("experiments") && manifest.experiments?.length ? new Experiments({ manifest, kv, domain, analytics: this.analytics }) : null;
 
+    // Pixel surfaces: the app paints, this holds the latest frame, and the window is told there is a new one to fetch.
+    const surfaces = granted.has("gpu.surface") ? new Surfaces({ onFrame: (handle, seq) => this.#emit({ kind: "surface", handle, seq }) }) : null;
+
     this.host = new AppHost({
       spawn: this.spawn,
       component: this.component,
@@ -364,6 +370,7 @@ export class Controller {
       analytics: this.analytics,
       experiments: this.experiments,
       storage: ["storage.local", "storage.sync"].some((c) => granted.has(c)) ? new AppStorage(kv, domain) : null,
+      surfaces,
       onLog: log,
       watchdogMs: this.watchdogMs,
     });
@@ -479,6 +486,12 @@ export class Controller {
         return;
       }
 
+      // The window drew a surface's frame and is ready for the next one: tell the app, which is how it animates.
+      case "frame":
+        if (typeof body.handle !== "string" || !this.host?.surfaces?.info(body.handle)) throw new HttpError(404, "no such surface");
+        await this.#frame();
+        return;
+
       // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
       case "prompt/cancel":
       case "auth/cancel":
@@ -531,6 +544,30 @@ export class Controller {
   /** The identity provider sent the user's browser back. Returns what to tell the user. */
   authCallback(params) {
     return this.auth ? this.auth.callback(params) : { ok: false, message: "Sign-in is not available." };
+  }
+
+  /** The latest frame of one of the app's surfaces, for the window to draw, or null. */
+  surfaceFrame(handle) {
+    return this.host?.surfaces?.frame(handle) ?? null;
+  }
+
+  #frameBusy = false;
+  #lastFrame = 0;
+
+  /** Tell the app a frame is wanted, at most about 30 times a second and never while the last one is still being handled. */
+  async #frame() {
+    const t = performance.now();
+    if (this.#frameBusy || t - this.#lastFrame < MIN_FRAME_GAP_MS || !this.session) return;
+    this.#frameBusy = true;
+    this.#lastFrame = t;
+    try {
+      const { focus, changed } = await this.session.event({ tag: "frame", val: t });
+      if (changed) this.#emit(this.snap(focus));
+    } catch (e) {
+      this.log("warn", `frame failed: ${e.message}`);
+    } finally {
+      this.#frameBusy = false;
+    }
   }
 
   /** The payment processor sent the user's browser back. `outcome` is "return" or "cancel". */

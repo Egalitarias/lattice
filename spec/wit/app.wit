@@ -87,6 +87,10 @@ interface lifecycle {
         /// The session changed without the app asking (sign-out from the host's own chrome, expiry).
         /// Sign-ins the app starts are reported by the call's own return value instead.
         session-changed(session-info),
+        /// The host has shown the last frame of a `surface` and wants the next one. Milliseconds on the host's clock.
+        /// Sent at most about 30 times a second, never while the previous one is still being handled, and only while a
+        /// canvas of this app that names a surface is on screen. This is how an app animates: paint, `present`, return.
+        frame(f64),
     }
 
     /// Called once, before any other export. A failure aborts launch with a host error view.
@@ -117,6 +121,7 @@ world app {
     import payments;
     import analytics;
     import experiments;
+    import surface;
     import notifications;
     import consent;
 

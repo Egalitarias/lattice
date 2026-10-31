@@ -37,6 +37,30 @@
     }
   },
   "topics": {
+    "fireflies": {
+      "description": "Fireflies drifting over the grid, in hundredths of a cell. They move all the time, so each message is sent as a datagram: a lost one is replaced by the next, a late one is ignored.",
+      "delivery": "datagram",
+      "message": {
+        "type": "object",
+        "required": ["flies"],
+        "additionalProperties": false,
+        "properties": {
+          "flies": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": ["x", "y"],
+              "additionalProperties": false,
+              "properties": {
+                "x": { "type": "integer", "minimum": 0, "maximum": 2400 },
+                "y": { "type": "integer", "minimum": 0, "maximum": 2400 }
+              }
+            }
+          }
+        }
+      }
+    },
     "world": {
       "description": "Everyone who is in the world, and where. Each message is the whole picture, so a missed one is repaired by the next.",
       "message": {

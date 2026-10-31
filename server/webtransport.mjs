@@ -109,7 +109,7 @@ export async function startWebTransport({ topics, host = "127.0.0.1", port = 0, 
   let sessions = 0;
   let stopped = false;
 
-  async function serveStream(stream) {
+  async function serveStream(stream, datagrams) {
     const reader = stream.readable.getReader();
     const writer = stream.writable.getWriter();
     let pending = 0;
@@ -128,6 +128,13 @@ export async function startWebTransport({ topics, host = "127.0.0.1", port = 0, 
         writer.write(bytes).then(() => (pending -= bytes.length), finish);
       },
       queued: () => pending,
+      // Datagrams are best effort: one that does not fit is the caller's to send on the stream, one that finds the connection
+      // busy is dropped, because the next message supersedes it.
+      datagram: datagrams && ((bytes) => {
+        if (closed || bytes.length > datagrams.max()) return false;
+        if ((datagrams.writer.desiredSize ?? 1) > 0) datagrams.writer.write(bytes).catch(() => {});
+        return true;
+      }),
       destroy() {
         finish();
         writer.abort().catch(() => {});
@@ -165,6 +172,9 @@ export async function startWebTransport({ topics, host = "127.0.0.1", port = 0, 
       await session.ready;
       session.closed.finally(() => sessions--).catch(() => {});
       const incoming = session.incomingBidirectionalStreams.getReader();
+      // Not every build of the package offers datagrams; without them a datagram topic simply travels on the streams.
+      const dg = session.datagrams?.writable ? { writer: session.datagrams.writable.getWriter(), max: () => session.datagrams.maxDatagramSize ?? 0 } : null;
+      dg?.writer.closed.catch(() => {});
       for (;;) {
         const { value: stream, done } = await incoming.read();
         if (done) break;
@@ -173,7 +183,7 @@ export async function startWebTransport({ topics, host = "127.0.0.1", port = 0, 
           continue;
         }
         streams++;
-        serveStream(stream).finally(() => streams--);
+        serveStream(stream, dg).finally(() => streams--);
       }
     } catch {
       /* the session ended */

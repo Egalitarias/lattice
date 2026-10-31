@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { loadApp, createServer } from "../../server/server.mjs";
 import { startNavigator } from "../navigator.mjs";
 import { StreamClient, MAX_SUBSCRIPTIONS, MAX_LINE } from "../stream.mjs";
+import { decode } from "../../shared/cbor.mjs";
 import { SHARED_CACHE, listen, close, sleep, quiet, find, all } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -228,9 +229,9 @@ async function player(w) {
   const nav = await startNavigator({ cacheDir: SHARED_CACHE, url: `${w.base}/`, dev: true, port: 0, dataDir: dir, log: quiet, streamBackoffMs: [20, 100] });
   const state = () => fetch(`http://127.0.0.1:${nav.port}/_navigator/state`).then((r) => r.json());
   const status = async () => find((await state()).tree, (n) => /online/.test(n.props?.text ?? ""))?.props.text;
-  // Where everyone is drawn: the filled circles of the canvas's drawing, as "x,y" cells of 40 units.
+  // Where everyone is drawn: the filled circles of the canvas (not the fireflies)'s drawing, as "x,y" cells of 40 units.
   const canvas = async () => find((await state()).tree, (n) => n.type === "canvas");
-  const cells = async () => (await canvas()).props.drawing.ops.filter((o) => o.tag === "ellipse" && !o.val.outline).map((o) => `${Math.floor(o.val.cx / 40)},${Math.floor(o.val.cy / 40)}`).sort();
+  const cells = async () => (await canvas()).props.drawing.ops.filter((o) => o.tag === "ellipse" && !o.val.outline && o.val.tone !== "caution").map((o) => `${Math.floor(o.val.cx / 40)},${Math.floor(o.val.cy / 40)}`).sort();
   const at = async () => (await status())?.match(/column (\d+), row (\d+)/)?.slice(1).join(",");
   const move = async (label) => {
     const b = find((await state()).tree, (n) => n.type === "button" && n.props.label === label);
@@ -294,4 +295,140 @@ test("world: after the server cuts every stream the Navigators reconnect and rec
     await a.stop();
     await w.close();
   }
+});
+
+// ---- Datagram topics ---------------------------------------------------------------------------------------------
+
+/**
+ * A WebTransport stand-in the test drives by hand: one stream per subscription (the test writes its lines), and a
+ * datagram readable the test pushes bytes into.
+ */
+function fakeWebTransport() {
+  const fake = { streams: [], sent: [] };
+  let datagrams;
+  fake.ctor = class {
+    ready = Promise.resolve();
+    closed = new Promise(() => {});
+    datagrams = { readable: new ReadableStream({ start: (c) => (datagrams = c) }) };
+    close() {}
+    async createBidirectionalStream() {
+      let ctl;
+      const readable = new ReadableStream({ start: (c) => (ctl = c) });
+      const writable = new WritableStream({ write: (chunk) => void fake.sent.push(new TextDecoder().decode(chunk)) });
+      fake.streams.push({ line: (s) => ctl.enqueue(new TextEncoder().encode(`${s}\n`)) });
+      return { readable, writable };
+    }
+  };
+  fake.datagram = (value) => datagrams.enqueue(typeof value === "string" ? new TextEncoder().encode(value) : value);
+  return fake;
+}
+
+const dgDescription = {
+  topics: {
+    flies: { delivery: "datagram", message: { type: "object", required: ["n"], additionalProperties: false, properties: { n: { type: "integer" } } } },
+    world: description.topics.world,
+  },
+};
+const dgClient = (wt) => {
+  const got = [];
+  const problems = [];
+  const c = new StreamClient({
+    endpoint: "http://x/rpc", description: dgDescription, apiHash: "h", session: null,
+    onMessage: (topic, bytes) => got.push([topic, decode(bytes)]), onProblem: (t, why) => problems.push(why),
+    backoffMs: [10, 20], webTransport: { ctor: wt.ctor, url: "https://x/stream", certHash: null },
+  });
+  return { c, got, problems };
+};
+const dg = (topic, seq, payload) => JSON.stringify({ topic, seq, payload });
+
+test("datagram topics: the newest message wins; a late or repeated one is ignored, and so is anything that is not for this subscription", async () => {
+  const wt = fakeWebTransport();
+  const { c, got, problems } = dgClient(wt);
+  try {
+    c.subscribe("flies");
+    assert.ok(await until(() => wt.streams.length === 1), "the subscription's stream opened");
+    wt.streams[0].line('{"seq":1,"payload":{"n":1}}'); // the snapshot, on the stream
+    assert.ok(await until(() => got.length === 1));
+
+    wt.datagram(dg("flies", 3, { n: 3 }));
+    wt.datagram(dg("flies", 2, { n: 2 })); // outrun by 3
+    wt.datagram(dg("flies", 3, { n: 3 })); // repeated
+    assert.ok(await until(() => got.length === 2));
+    await sleep(60);
+    assert.deepEqual(got.map(([, m]) => m.n), [1, 3]);
+    assert.equal(c.datagrams.stale, 2);
+
+    // A stream frame that a datagram already outran is old news as well; a newer one is delivered.
+    wt.streams[0].line('{"seq":2,"payload":{"n":2}}');
+    wt.streams[0].line('{"seq":4,"payload":{"n":4}}');
+    assert.ok(await until(() => got.length === 3));
+    assert.deepEqual(got.map(([, m]) => m.n), [1, 3, 4]);
+
+    // Things that are not delivered: another topic, a topic that is not a datagram topic, one the app has not subscribed to,
+    // a message that breaks the description, nonsense, and anything too big to be a datagram.
+    const refusedBefore = c.datagrams.refused;
+    wt.datagram(dg("world", 9, { n: 9 }));
+    wt.datagram(dg("other", 9, { n: 9 }));
+    wt.datagram(dg("flies", 10, { n: "ten" }));
+    wt.datagram(dg("flies", 0, { n: 1 }));
+    wt.datagram(dg("flies", 1.5, { n: 1 }));
+    wt.datagram('{"topic":"flies","seq":11}');
+    wt.datagram("not json");
+    wt.datagram(new Uint8Array([0xff, 0xfe]));
+    wt.datagram(dg("flies", 12, { n: 1, pad: "x".repeat(2000) }));
+    await sleep(80);
+    assert.equal(c.datagrams.refused - refusedBefore, 9);
+    assert.deepEqual(got.map(([, m]) => m.n), [1, 3, 4], "none of it reached the app");
+    assert.ok(problems.some((p) => /violates the API description/.test(p)));
+  } finally { c.close(); }
+});
+
+test("datagram topics: after a reconnect the numbering starts again, and datagrams stop with the subscription", async () => {
+  const wt = fakeWebTransport();
+  const { c, got } = dgClient(wt);
+  try {
+    c.subscribe("flies");
+    assert.ok(await until(() => wt.streams.length === 1));
+    wt.streams[0].line('{"seq":1,"payload":{"n":1}}');
+    wt.datagram(dg("flies", 50, { n: 50 }));
+    assert.ok(await until(() => got.length === 2));
+
+    c.unsubscribe("flies"); // the app lets go
+    wt.datagram(dg("flies", 51, { n: 51 }));
+    c.subscribe("flies"); // and asks again: a new stream, numbered from 1
+    assert.ok(await until(() => wt.streams.length === 2));
+    wt.streams[1].line('{"seq":1,"payload":{"n":100}}');
+    assert.ok(await until(() => got.length === 3));
+    assert.deepEqual(got.map(([, m]) => m.n), [1, 50, 100], "what arrived while unsubscribed was not delivered, and seq 1 is new again");
+  } finally { c.close(); }
+});
+
+test("server: a datagram topic sends updates as datagrams when the subscriber has them and they fit; the snapshot, the big and the rest go on the stream", async () => {
+  const { createTopics } = await import("../../server/topics.mjs");
+  const apiDescription = {
+    topics: {
+      flies: { delivery: "datagram", message: { type: "object", required: ["n"], additionalProperties: false, properties: { n: { type: "integer" }, pad: { type: "string", maxLength: 5000 } } } },
+      calm: { message: { type: "object", required: ["n"], additionalProperties: false, properties: { n: { type: "integer" } } } },
+    },
+  };
+  const hub = createTopics({ apiDescription, apiHash: "h", authorize: () => ({ snapshot: { n: 0 } }), heartbeatMs: 1e6 });
+  const sink = (withDatagrams, max = 1000) => {
+    const s = { lines: [], datagrams: [], closers: [], write: (x) => s.lines.push(x), queued: () => 0, destroy: () => s.closers.forEach((f) => f()), onClose: (f) => s.closers.push(f) };
+    if (withDatagrams) s.datagram = (b) => (b.length > max ? false : (s.datagrams.push(JSON.parse(new TextDecoder().decode(b))), true));
+    return s;
+  };
+  const withDg = sink(true), without = sink(false), calm = sink(true);
+  await hub.open("flies", { api: "h" }, withDg);
+  await hub.open("flies", { api: "h" }, without);
+  await hub.open("calm", { api: "h" }, calm);
+  hub.publish("flies", { n: 1 });
+  hub.publish("flies", { n: 2, pad: "x".repeat(3000) }); // does not fit in a datagram
+  hub.publish("calm", { n: 1 });
+
+  assert.deepEqual(withDg.lines.map((l) => JSON.parse(l)), [{ seq: 1, payload: { n: 0 } }, { seq: 3, payload: { n: 2, pad: "x".repeat(3000) } }], "the snapshot and the big message are on the stream");
+  assert.deepEqual(withDg.datagrams, [{ topic: "flies", seq: 2, payload: { n: 1 } }], "the small update is a datagram, numbered in the same sequence");
+  assert.deepEqual(without.lines.map((l) => JSON.parse(l).seq), [1, 2, 3], "a subscriber with no datagrams gets everything on its stream");
+  assert.deepEqual(calm.datagrams, [], "a reliable topic never uses them");
+  assert.equal(calm.lines.length, 2);
+  hub.close();
 });

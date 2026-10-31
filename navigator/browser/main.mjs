@@ -124,6 +124,10 @@ async function main() {
       return () => listeners.delete(handler);
     },
     state: async () => controller.current(),
+    surface: async (handle) => {
+      const f = controller.surfaceFrame(handle);
+      return f && { ...f, pixels: new Uint8ClampedArray(f.pixels.buffer, f.pixels.byteOffset, f.pixels.byteLength) };
+    },
   });
 
   // Tests drive a few things the user would not (flush analytics now); never offered outside loopback development.

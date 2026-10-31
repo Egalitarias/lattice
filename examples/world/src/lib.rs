@@ -2,6 +2,7 @@
 //!
 //! The component never polls. It joins over RPC, subscribes to the `world` topic, and redraws whenever the host
 //! delivers a message. Each message is the whole picture, so a message that was dropped is repaired by the next.
+//! The fireflies topic is sent as unreliable datagrams, many times a second; the app does not know or care.
 
 wit_bindgen::generate!({
     path: "../../spec/wit",
@@ -42,6 +43,17 @@ struct Picture {
     players: Vec<Player>,
 }
 
+#[derive(Clone, Deserialize)]
+struct Fly {
+    x: u32,
+    y: u32,
+}
+
+#[derive(Deserialize)]
+struct Swarm {
+    flies: Vec<Fly>,
+}
+
 #[derive(Deserialize)]
 struct Joined {
     id: u32,
@@ -64,6 +76,7 @@ struct State {
     width: u32,
     height: u32,
     players: Vec<Player>,
+    flies: Vec<Fly>,
 }
 
 thread_local! {
@@ -118,6 +131,10 @@ fn drawing() -> Drawing {
         for y in 0..=s.height {
             let py = y as f32 * CELL;
             ops.push(DrawOp::Line(DrawLine { x1: 0.0, y1: py, x2: w, y2: py, tone: Tone::Muted, width: 0.5 }));
+        }
+        for f in &s.flies {
+            // Hundredths of a cell. Drawn under the players, small and warm.
+            ops.push(DrawOp::Ellipse(DrawEllipse { cx: f.x as f32 / 100.0 * CELL, cy: f.y as f32 / 100.0 * CELL, rx: CELL * 0.07, ry: CELL * 0.07, tone: Tone::Caution, outline: false }));
         }
         for p in &s.players {
             let (cx, cy) = ((p.x as f32 + 0.5) * CELL, (p.y as f32 + 0.5) * CELL);
@@ -229,6 +246,7 @@ impl Guest for WorldApp {
         });
         // The first message on the topic is the current picture, so it arrives straight after this returns.
         rpc::subscribe("world").map_err(|e| AppError::Internal(format!("subscribe: {e:?}")))?;
+        rpc::subscribe("fireflies").map_err(|e| AppError::Internal(format!("subscribe: {e:?}")))?;
         Ok(world_scene())
     }
 
@@ -260,6 +278,12 @@ impl Guest for WorldApp {
                 let picture: Picture = ciborium::from_reader(m.payload.as_slice()).map_err(|e| AppError::Internal(format!("decode world: {e}")))?;
                 STATE.with(|s| s.borrow_mut().players = picture.players);
                 Ok(redraw())
+            }
+            HostEvent::StreamMessage(m) if m.topic == "fireflies" => {
+                let swarm: Swarm = ciborium::from_reader(m.payload.as_slice()).map_err(|e| AppError::Internal(format!("decode fireflies: {e}")))?;
+                STATE.with(|s| s.borrow_mut().flies = swarm.flies);
+                // Only the picture: the status line and the description have not changed.
+                Ok(Update { ops: vec![PatchOp::SetNode(canvas_node())], focus: None })
             }
             _ => Ok(Update { ops: vec![], focus: None }),
         }

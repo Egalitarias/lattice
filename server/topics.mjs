@@ -9,17 +9,20 @@ import { encode } from "../shared/cbor.mjs";
 import { ApiError, RPC_ERROR_TYPE } from "./rpc.mjs";
 
 const MAX_QUEUED = 256 * 1024;
+const utf8 = new TextEncoder();
 
 /**
  * @param opts.authorize  (topic, ctx) => void | { snapshot?: message }; throw ApiError to refuse. ctx = { session }.
  * @param opts.maxSubscribers  per topic
  *
  * A *sink* is where one subscriber's frames go: { write(string), queued() -> bytes waiting, destroy(), onClose(fn) }.
+ * A sink on a WebTransport session also has `datagram(bytes) -> boolean`: true if it took the datagram (sent, or dropped
+ * because the connection is busy, which is what a datagram means), false if it cannot carry it (too big).
  */
 export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs = 15_000, maxSubscribers = 1000, log = console.error }) {
   const topics = new Map();
   for (const [name, t] of Object.entries(apiDescription.topics ?? {})) {
-    topics.set(name, { message: new Schema(t.message), subs: new Set() });
+    topics.set(name, { name, message: new Schema(t.message), subs: new Set(), datagram: t.delivery === "datagram" });
   }
 
   const fail = (res, status, code, message) => {
@@ -36,13 +39,18 @@ export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs =
     return t;
   }
 
-  function send(t, sub, message) {
+  /** `reliably`: always on the stream (a snapshot must arrive). */
+  function send(t, sub, message, reliably = false) {
     if (sub.sink.queued() > MAX_QUEUED) {
       t.subs.delete(sub);
       sub.sink.destroy();
       return;
     }
-    sub.sink.write(`${JSON.stringify({ seq: ++sub.seq, payload: message })}\n`);
+    const seq = ++sub.seq;
+    // A datagram topic: the newest state, fast and unreliable. A message that does not fit in a datagram, or a subscriber with
+    // no datagrams, gets it on the stream as usual; the sequence number is shared so the client can tell which is newer.
+    if (t.datagram && !reliably && sub.sink.datagram?.(utf8.encode(JSON.stringify({ topic: t.name, seq, payload: message })))) return;
+    sub.sink.write(`${JSON.stringify({ seq, payload: message })}\n`);
   }
 
   /**
@@ -66,7 +74,7 @@ export function createTopics({ apiDescription, apiHash, authorize, heartbeatMs =
       clearInterval(beat);
       t.subs.delete(sub);
     });
-    if (grant.snapshot !== undefined) send(t, sub, grant.snapshot);
+    if (grant.snapshot !== undefined) send(t, sub, grant.snapshot, true);
     else sink.write("\n"); // tells the client the stream is open
     return { close: () => sink.destroy() };
   }

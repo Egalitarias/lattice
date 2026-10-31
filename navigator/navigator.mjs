@@ -111,6 +111,14 @@ export async function startNavigator({ url, dev = false, port = 7070, dataDir = 
         return void send(res, controller.current());
       }
 
+      // One surface frame: the raw RGBA bytes, with their size in headers. Same-origin only, like the state.
+      if (req.method === "GET" && u.pathname.startsWith("/_navigator/surface/")) {
+        const f = controller.surfaceFrame(u.pathname.slice("/_navigator/surface/".length));
+        if (!f) throw new HttpError(404, "no such surface");
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "X-Width": String(f.width), "X-Height": String(f.height), "X-Seq": String(f.seq) });
+        return void res.end(Buffer.from(f.pixels.buffer, f.pixels.byteOffset, f.pixels.byteLength));
+      }
+
       if (req.method === "GET" && u.pathname === "/_navigator/state") {
         res.writeHead(200, { "Content-Type": "application/json" });
         return void res.end(JSON.stringify(controller.current()));

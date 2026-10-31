@@ -173,7 +173,9 @@ interface scene {
     record canvas {
         label: string,
         description: string,
-        /// Surface handle granted via `gpu.surface`.
+        /// Handle returned by `surface.create` (capability `gpu.surface`). The canvas shows that surface's latest frame, sized
+        /// by the surface; `drawing` must be absent. A handle the app did not create makes the scene invalid. Pointer and key
+        /// input is reported in surface pixels.
         surface: option<string>,
         /// A 2D picture the host paints. Data, not code: no capability is needed to draw it.
         drawing: option<drawing>,

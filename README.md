@@ -143,6 +143,13 @@ The world is painted on a `Canvas` from a display list, and moves with the arrow
 server also starts a WebTransport listener (the optional packages must be installed) and the page uses it. 
 `node test/world-browser-check.mjs` drives two real browsers through it.
 
+`examples/surface` paints its own picture: a plasma the component computes pixel by pixel and hands to the host as frames
+(`gpu.surface`, `spec/capabilities.md`). The host asks for each frame only after it has shown the last, at most about 30 a
+second. Build it and serve it like the others (`--app ../examples/surface`, `http://surface.localhost:8082/`), or check it in
+a real browser with `node test/surface-browser-check.mjs` (browser Navigator) or `... --node` (Node Navigator).
+It is a *pixel* surface: the app renders in software inside the sandbox and the host composites the frame. Giving a sandboxed
+component real GPU commands (WebGPU, wasi-gfx) is not attempted; see "Not specified yet" in `spec/wit/README.md`.
+
 ### Browser mode
 
 ```
@@ -160,7 +167,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   removes the `*.localhost`-only limits below for passkeys and payments (non-loopback use needs TLS), but trusts the
   origin that serves it; its component storage is `localStorage`.
 - Implemented host imports: `log`, `storage`, `rpc` (including topic subscriptions), `session`, `auth`, `payments`,
-  `analytics`, `experiments`. The rest of `spec/wit/capabilities.wit` (`navigation`, `notifications`, `consent`) is
+  `analytics`, `experiments`, `surface`. The rest of `spec/wit/capabilities.wit` (`navigation`, `notifications`, `consent`) is
   specified, not implemented.
 - State: with `--data <file>` the origin keeps accounts, sessions, orders and signed-in users' tasks across restarts (SQLite,
   through Node's still-experimental `node:sqlite`; one process per file). Without it they are in memory. In memory either
@@ -184,12 +191,14 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 - RPC: no cross-origin APIs, JSON data model only (see `spec/rpc.md`).
 - Server push: declared `topics` delivered over WebTransport (HTTP/3, via the optional `@fails-components/webtransport`
   package) or, as a fallback, streaming HTTPS (`spec/rpc.md`, "Topics"); validated by the host, bounded and
-  re-connecting. WebTransport datagrams are not used. A development certificate is pinned through the manifest
+  re-connecting. A topic may be declared `"delivery": "datagram"` for fast-moving state (the World's fireflies): its updates travel as
+  unreliable WebTransport datagrams when they fit, newest wins, and on the stream otherwise. Nothing goes from the client to the
+  server by datagram. A development certificate is pinned through the manifest
   (loopback only); production needs a real certificate and a UDP port. No resumable streams: a reconnect gets
   a fresh snapshot from the server, so topics should carry state, not commands.
 - Plain `http` is accepted only on loopback with `--dev`; the dev flag also accepts a manifest domain that
   differs from the address fetched.
-- Renderer gaps: `layer` constraints, GPU-surface `canvas` (display-list drawings work), `media` with hashed sources, `ad-slot` and `embed` are placeholders.
+- Renderer gaps: `layer` constraints, `media` with hashed sources, `ad-slot` and `embed` are placeholders.
 - Rust apps built for `wasm32-wasip2` import libc-level WASI; Lattice Navigator provides a sandboxed shim with no filesystem,
   environment or network.
 - One user, one app instance per Lattice Navigator process.
@@ -209,7 +218,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6f. [x] A wallet sheet: Google Pay through the Payment Request API
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
 7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
-7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface
+7c. [x] Datagrams for fast-moving state; an app-painted pixel surface (`gpu.surface`; not GPU commands)
 8. [x] Durable origin state: `--data` keeps accounts, sessions and orders across restarts
 
 ## License

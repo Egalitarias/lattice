@@ -9,6 +9,8 @@ const WIDTH = 12;
 const HEIGHT = 8;
 const IDLE_MS = 5 * 60_000;
 const MAX_PLAYERS = 200;
+const FLIES = 8;
+const FLY_TICK_MS = 100;
 const ADJECTIVES = ["Quick", "Quiet", "Brave", "Gentle", "Bright", "Calm", "Eager", "Merry"];
 const ANIMALS = ["Otter", "Heron", "Fox", "Lynx", "Wren", "Hare", "Newt", "Crane"];
 
@@ -30,6 +32,24 @@ export async function setup({ topics, log }) {
     return { x: 0, y: 0 };
   };
 
+  // Fireflies wander over the grid, in hundredths of a cell, and are sent about ten times a second to whoever is watching.
+  // Nothing depends on any one message arriving: the next one says where they are.
+  const flies = Array.from({ length: FLIES }, () => ({ x: Math.random() * WIDTH * 100, y: Math.random() * HEIGHT * 100, vx: 0, vy: 0 }));
+  const swarm = () => ({ flies: flies.map((f) => ({ x: Math.round(f.x), y: Math.round(f.y) })) });
+  const drift = setInterval(() => {
+    if (!topics.subscribers("fireflies")) return;
+    for (const f of flies) {
+      f.vx = Math.max(-12, Math.min(12, f.vx + (Math.random() - 0.5) * 8));
+      f.vy = Math.max(-12, Math.min(12, f.vy + (Math.random() - 0.5) * 8));
+      f.x += f.vx;
+      f.y += f.vy;
+      if (f.x < 0 || f.x > WIDTH * 100) { f.vx = -f.vx; f.x = Math.max(0, Math.min(WIDTH * 100, f.x)); }
+      if (f.y < 0 || f.y > HEIGHT * 100) { f.vy = -f.vy; f.y = Math.max(0, Math.min(HEIGHT * 100, f.y)); }
+    }
+    topics.publish("fireflies", swarm());
+  }, FLY_TICK_MS);
+  drift.unref();
+
   const sweep = setInterval(() => {
     const cutoff = Date.now() - IDLE_MS;
     let changed = false;
@@ -42,7 +62,7 @@ export async function setup({ topics, log }) {
     // Anyone with a session may watch. The first thing a new subscriber gets is the current picture.
     authorizeTopic(topic, ctx) {
       session(ctx);
-      return { snapshot: picture() };
+      return { snapshot: topic === "fireflies" ? swarm() : picture() };
     },
     handlers: {
       async join(_req, ctx) {

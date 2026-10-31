@@ -10,7 +10,7 @@
 //   worker -> main  { type: "log", level, message }
 //   worker -> main  { type: "analytics", op, ... }        fire and forget
 //   worker -> main  { type: "host", kind, ...payload }    then block until main fills the shared buffer
-//                   (kind: rpc | storage | session-current | session-sign-out | oidc | passkey | payment)
+//                   (kind: rpc | storage | session-current | session-sign-out | oidc | passkey | payment | surface-*)
 //   worker -> main  { type: "ready" } | { type: "failed", message, link }
 
 import { hostImports } from "./host.mjs";

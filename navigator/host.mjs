@@ -16,6 +16,7 @@ export const CAPABILITY_IMPORTS = {
   "lattice:app/payments": ["payments.request"],
   "lattice:app/analytics": ["analytics.event"],
   "lattice:app/experiments": ["experiments"],
+  "lattice:app/surface": ["gpu.surface"],
 };
 
 /** Throw a WIT `err` from a host function. jco reads the payload property. */
@@ -116,6 +117,14 @@ export function hostImports({ granted, onLog, hostCall, post }) {
   if (hostCall && granted.has("experiments")) {
     imports["lattice:app/experiments"] = {
       lookup: (name) => fromUtf8(unwrap(hostCall("experiment", { name }))),
+    };
+  }
+
+  if (hostCall && granted.has("gpu.surface")) {
+    imports["lattice:app/surface"] = {
+      create: (width, height) => fromUtf8(unwrap(hostCall("surface-create", { width, height }))),
+      present: (handle, pixels) => void unwrap(hostCall("surface-present", { handle, pixels })),
+      destroy: (handle) => void unwrap(hostCall("surface-destroy", { handle })),
     };
   }
 

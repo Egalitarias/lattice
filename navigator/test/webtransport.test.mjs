@@ -204,3 +204,64 @@ wtTest("webtransport: a certificate that is not the pinned one is not trusted", 
     assert.equal(a.transport(), "https", "never over a connection whose certificate does not match the pin");
   } finally { await a.stop(); await wrong.close(); await w.close(); }
 });
+
+// ---- Datagrams ------------------------------------------------------------------------------------------------------
+
+wtTest("webtransport: a datagram topic sends its snapshot on the stream and its updates as datagrams, and never a reliable topic", async () => {
+  const w = await world();
+  const c = await rawClient(w);
+  try {
+    const datagrams = [];
+    const reader = c.t.datagrams.readable.getReader();
+    (async () => { for (;;) { const r = await reader.read().catch(() => ({ done: true })); if (r.done) return; datagrams.push(JSON.parse(new TextDecoder().decode(r.value))); } })();
+
+    const [snapshot] = await c.ask(req(w, { topic: "fireflies" }), { wait: 3000 });
+    assert.equal(snapshot.seq, 1, "the snapshot is on the stream");
+    assert.equal(snapshot.payload.flies.length, 8);
+
+    // The streams in rawClient are cancelled after reading, so subscribe again and keep it open.
+    const s = await c.t.createBidirectionalStream();
+    await s.writable.getWriter().write(new TextEncoder().encode(req(w, { topic: "fireflies" })));
+    assert.ok(await until(() => datagrams.length >= 3), "updates arrive as datagrams");
+    for (const d of datagrams) {
+      assert.equal(d.topic, "fireflies");
+      assert.ok(Number.isInteger(d.seq) && d.seq > 1);
+      assert.equal(d.payload.flies.length, 8);
+    }
+    const seqs = datagrams.map((d) => d.seq);
+    assert.ok(seqs.every((q, i) => i === 0 || q !== seqs[i - 1]), "every datagram carries a new sequence number");
+
+    // A reliable topic is not sent as datagrams, however often it changes.
+    const before = datagrams.length;
+    const s2 = await c.t.createBidirectionalStream();
+    await s2.writable.getWriter().write(new TextEncoder().encode(req(w)));
+    w.app.topics.publish("world", { players: [] });
+    w.app.topics.publish("world", { players: [] });
+    await sleep(150);
+    assert.ok(datagrams.slice(before).every((d) => d.topic === "fireflies"), "no datagram for the world topic");
+  } finally { c.t.close(); await w.close(); }
+});
+
+wtTest("webtransport: two Navigators watch the fireflies by datagram, and one without WebTransport sees them over HTTPS", async () => {
+  const w = await world();
+  const a = await player(w);
+  try {
+    const stream = () => a.nav.controller.host.stream;
+    assert.ok(await until(() => stream().datagrams.delivered >= 5), "datagrams reached the host");
+    const flies = async () => find((await a.nav.controller.state?.() ?? await fetch(`http://127.0.0.1:${a.nav.port}/_navigator/state`).then((r) => r.json())).tree, (n) => n.type === "canvas").props.drawing.ops.filter((o) => o.tag === "ellipse" && o.val.tone === "caution");
+    assert.equal((await flies()).length, 8, "drawn on the canvas");
+    const first = JSON.stringify(await flies());
+    assert.ok(await until(async () => JSON.stringify(await flies()) !== first), "and they move");
+    assert.equal(stream().datagrams.refused, 0);
+  } finally { await a.stop(); await w.close(); }
+
+  const w2 = await world({ wt: false });
+  const b = await player(w2);
+  try {
+    assert.ok(await until(async () => b.nav.controller.host.stream.transports.get("fireflies") === "https"));
+    const state = () => fetch(`http://127.0.0.1:${b.nav.port}/_navigator/state`).then((r) => r.json());
+    const flies = async () => find((await state()).tree, (n) => n.type === "canvas").props.drawing.ops.filter((o) => o.tag === "ellipse" && o.val.tone === "caution").length;
+    assert.ok(await until(async () => (await flies()) === 8), "the same topic works on the stream alone");
+    assert.equal(b.nav.controller.host.stream.datagrams.delivered, 0);
+  } finally { await b.stop(); await w2.close(); }
+});

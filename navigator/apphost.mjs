@@ -39,11 +39,12 @@ export class AppHost {
    * @param opts.payments    PaymentBroker, or null
    * @param opts.analytics   Analytics, or null
    * @param opts.storage     AppStorage, or null
+   * @param opts.surfaces    Surfaces, or null (`gpu.surface`)
    * @param opts.watchdogMs  longest the component may run without finishing a call. Time spent waiting
    *                         on a host call (the network, a person) does not count.
    */
-  constructor({ spawn, component, granted, rpc = null, stream = null, experiments = null, session = null, auth = null, payments = null, analytics = null, storage = null, onLog, watchdogMs = 30_000, debug = false }) {
-    Object.assign(this, { spawn, component, granted: [...granted], rpc, stream, experiments, session, auth, payments, analytics, storage, onLog, watchdogMs, debug });
+  constructor({ spawn, component, granted, rpc = null, stream = null, experiments = null, session = null, auth = null, payments = null, analytics = null, storage = null, surfaces = null, onLog, watchdogMs = 30_000, debug = false }) {
+    Object.assign(this, { spawn, component, granted: [...granted], rpc, stream, experiments, session, auth, payments, analytics, storage, surfaces, onLog, watchdogMs, debug });
   }
 
   async start() {
@@ -51,7 +52,7 @@ export class AppHost {
       component: this.component,
       granted: this.granted,
       sab: this.#sab,
-      hasHost: !!(this.rpc || this.stream || this.experiments || this.session || this.auth || this.payments || this.storage),
+      hasHost: !!(this.rpc || this.stream || this.experiments || this.session || this.auth || this.payments || this.storage || this.surfaces),
       debug: this.debug,
     });
     this.#worker = worker;
@@ -189,6 +190,12 @@ export class AppHost {
           default: return { ok: false, error: { tag: "invalid-argument", val: "unknown storage operation" } };
         }
       }
+      case "surface-create":
+        return this.surfaces ? this.surfaces.create(m.width, m.height) : denied("gpu.surface");
+      case "surface-present":
+        return this.surfaces ? this.surfaces.present(m.handle, m.pixels) : denied("gpu.surface");
+      case "surface-destroy":
+        return this.surfaces ? this.surfaces.destroy(m.handle) : denied("gpu.surface");
       case "payment": {
         if (!this.payments) return denied("payments.request");
         const r = await this.payments.request(m.orderRef);
@@ -220,6 +227,7 @@ export class AppHost {
 
   kill() {
     this.stream?.reset();
+    this.surfaces?.reset();
     const w = this.#worker;
     this.#worker = null;
     w?.terminate();
