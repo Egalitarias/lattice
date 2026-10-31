@@ -93,8 +93,14 @@ test("3-D Secure: the sheet sends the user to the bank, and the webhook, not the
     assert.match((await card(h, prompt.id)).body.error, /bank/, "no other card while the bank is waiting");
 
     const { location } = await h.atProcessor(shown.url, "complete");
-    assert.equal((await h.callback(location)).status, 200);
+    // Stripe appends the intent's client secret to the return address, as the stand-in now does. The host must not keep it.
+    const secret = new URL(location).searchParams.get("payment_intent_client_secret");
+    assert.match(secret, /^pi_[A-Za-z0-9]+_secret_/);
+    const back = await h.callback(location);
+    assert.equal(back.status, 200);
     assert.equal((await pending).status, 200);
+    assert.ok(!back.body.includes(secret) && !JSON.stringify(back.headers).includes(secret), "not echoed to the browser");
+    assert.ok(!JSON.stringify(await h.state()).includes(secret), "not in anything the window is shown");
 
     // The user came back, but nothing is paid until the signed webhook says so.
     assert.equal([...h.payments.orders.values()][0].status, "pending");

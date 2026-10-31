@@ -288,6 +288,7 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
           }
           const back = new URL(returnUrl);
           back.searchParams.set("payment_intent", intent.id);
+          back.searchParams.set("payment_intent_client_secret", intent.client_secret); // as Stripe does; the host must not keep it
           back.searchParams.set("redirect_status", outcome === "complete" ? "succeeded" : "failed");
           return void res.writeHead(303, { Location: back.href }).end();
         }

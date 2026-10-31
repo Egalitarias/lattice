@@ -181,3 +181,27 @@ test("plasma: a handle that is not the app's is refused everywhere", async () =>
     assert.equal(r.status, 403);
   });
 });
+
+test("surfaces: nothing an app passes can make the host throw, and only exact frames are ever kept", () => {
+  let seed = 99;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const junk = [undefined, null, true, "", "srf_", "x".repeat(10_000), -1, 0, 1, 2, 3.5, NaN, Infinity, 2 ** 31, 2 ** 53, [], {}, [1], new Uint8Array(0), new Uint8Array(7), new Uint8Array(16), new ArrayBuffer(16), "__proto__", "constructor"];
+  let now = 0;
+  const s = new Surfaces({ now: () => (now += 40) });
+  const handles = [];
+  for (let i = 0; i < 3000; i++) {
+    const op = Math.floor(rnd() * 4);
+    let r;
+    if (op === 0) { r = s.create(pick(junk), pick(junk)); if (r.ok) handles.push(text(r)); }
+    else if (op === 1) r = s.present(pick([...junk, ...handles]), pick(junk));
+    else if (op === 2) r = s.destroy(pick([...junk, ...handles]));
+    else { s.info(pick(junk)); s.frame(pick(junk)); continue; }
+    assert.ok(r.ok === true || (r.ok === false && typeof r.error.tag === "string"));
+    assert.ok(s.size <= MAX_SURFACES);
+  }
+  for (const h of handles) {
+    const f = s.frame(h);
+    if (f) assert.equal(f.pixels.length, f.width * f.height * 4, "a frame that was kept has exactly the right size");
+  }
+});

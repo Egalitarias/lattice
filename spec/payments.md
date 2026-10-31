@@ -146,8 +146,10 @@ Up to five attempts are allowed per sheet; a declined card keeps the sheet open 
 
 ### 3-D Secure in the sheet
 
-The bank's page opens in its own window, as hosted checkout does, so no processor script runs in the host and no client
-secret reaches it.
+The bank's page opens in its own window, as hosted checkout does, so no processor script runs in the host and the host never
+asks for or sends a client secret. (Stripe does append `payment_intent_client_secret` to the return address. The host's
+return handler reads only `state`, `payment_intent` and `redirect_status`, and the secret is not stored, logged, shown or
+passed to the app or the app's server; the browser relay clears the query from the address bar.)
 
 ```
 Host ── POST {payments.server}/confirm  { order_ref, reference, payment_method, return_url } ──────► Server
@@ -232,6 +234,8 @@ an account may send card numbers to its API directly, and prefers Elements or th
 handler is a working design against a stand-in that mirrors the documented shapes; it has not been run against a live
 processor. Using it in production means the *host* (Navigator) is in scope for the processor's card-data rules, which is
 a decision for whoever ships a Navigator, not for an app.
+Stripe's support can enable raw card data access for test mode alone, without compliance documents, which is what trying
+the sheet against Stripe's test cards needs.
 
 ## Webhooks and fulfilment (server)
 

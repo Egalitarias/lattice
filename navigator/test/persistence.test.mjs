@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -308,4 +308,18 @@ test("loadApp: --data opens the file for the app; without it nothing is written"
     memory.impl.auth.users.set("u_1", { name: "Ann", credentials: [] });
     assert.equal(readdirSync(dir).length, before);
   });
+});
+
+test("store: a file that is not a database, or one that cannot be written to, is refused with a message that names the file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lattice-store-"));
+  try {
+    const junk = join(dir, "junk.db");
+    writeFileSync(junk, "this is not a sqlite database, it is a text file ".repeat(40));
+    await assert.rejects(openStore(junk, { log: () => {} }), (e) => e.message.includes("junk.db") && /could not open the data file/.test(e.message));
+    assert.equal(readFileSync(junk, "utf8").startsWith("this is not"), true, "the file was not overwritten");
+
+    await assert.rejects(openStore(join(dir, "missing-dir", "x.db"), { log: () => {} }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

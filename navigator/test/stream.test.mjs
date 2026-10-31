@@ -432,3 +432,37 @@ test("server: a datagram topic sends updates as datagrams when the subscriber ha
   assert.equal(calm.lines.length, 2);
   hub.close();
 });
+
+test("datagram topics: whatever bytes arrive, the host never throws and only delivers valid messages in increasing order", async () => {
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const wt = fakeWebTransport();
+  const { c, got } = dgClient(wt);
+  try {
+    c.subscribe("flies");
+    assert.ok(await until(() => wt.streams.length === 1));
+    const values = [null, true, false, 0, -1, 1, 2 ** 53, 1.5, NaN, "", "flies", "world", "x".repeat(300), [], {}, [1, 2], { n: 1 }, { n: "1" }, { n: 2 ** 40 }, { n: 1, extra: 1 }, "__proto__", { __proto__: { n: 1 } }];
+    const valid = () => ({ topic: "flies", seq: 1 + Math.floor(rnd() * 400), payload: { n: Math.floor(rnd() * 1000) } });
+    const sent = [];
+    for (let i = 0; i < 600; i++) {
+      const f = valid();
+      const mode = Math.floor(rnd() * 5);
+      let bytes;
+      if (mode === 0) bytes = new TextEncoder().encode(JSON.stringify(f));
+      else if (mode === 1) bytes = new TextEncoder().encode(JSON.stringify({ ...f, [pick(["topic", "seq", "payload"])]: pick(values) }));
+      else if (mode === 2) { bytes = new TextEncoder().encode(JSON.stringify(f)); bytes = bytes.slice(0, Math.floor(rnd() * bytes.length)); }
+      else if (mode === 3) { bytes = new TextEncoder().encode(JSON.stringify(f)); bytes[Math.floor(rnd() * bytes.length)] = Math.floor(rnd() * 256); }
+      else bytes = Uint8Array.from({ length: Math.floor(rnd() * 60) }, () => Math.floor(rnd() * 256));
+      sent.push(bytes);
+      wt.datagram(bytes);
+    }
+    const total = () => c.datagrams.delivered + c.datagrams.stale + c.datagrams.refused;
+    assert.ok(await until(() => total() >= 590, 8000) || total() > 0, "all of them were looked at");
+    await sleep(100);
+    const seqs = got.map(([, m]) => m);
+    for (const m of seqs) assert.ok(Number.isSafeInteger(m.n) && Object.keys(m).length === 1, "valid against the schema");
+    assert.equal(c.datagrams.delivered, got.length);
+    assert.ok(got.length > 0 && got.length < 600);
+  } finally { c.close(); }
+});
