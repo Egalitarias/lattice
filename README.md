@@ -171,7 +171,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
   prototype they work for `*.localhost` names; OIDC works for any domain. See `spec/auth.md`.
 - Payments: hosted checkout, or a card sheet the host draws itself (`stripe-card`, with 3-D Secure in the bank's own window; see "Honest limits" in `spec/payments.md`: processors restrict raw card handling). The server code uses the
   official `stripe` library but has only been run against the bundled stand-in, which mirrors Stripe's documentation.
-  There is no wallet sheet, no recurring payments, refunds or receipts.
+  The card sheet can also offer Google Pay (`stripe-wallet`; Apple Pay is not supported). There are no recurring payments, refunds or receipts.
   A double payment (two checkout sessions for one order both paid) is detected and logged but not refunded.
   The server only accepts return addresses on the app's own domain, and Navigator serves its page there only for
   `*.localhost` names, so (like passkeys) payments work for `.localhost` apps in this prototype.
@@ -206,7 +206,7 @@ Check it with `node test/browser-mode-check.mjs`, or run the other browser check
 6c. [x] Analytics and error reporting: declared catalog, user levels, redaction, transparency
 6d. [x] A host-drawn card sheet; A/B experiments (`spec/experiments.md`)
 6e. [x] 3-D Secure in the card sheet
-6f. [ ] A wallet sheet (Payment Request API)
+6f. [x] A wallet sheet: Google Pay through the Payment Request API
 7. [x] Server push: typed topics, and a shared live grid (`examples/world`)
 7b. [x] WebTransport as a second transport, and a canvas-drawn 2D world (display-list `Canvas`)
 7c. [ ] Datagrams for fast-moving state, an app-painted GPU surface

@@ -10,8 +10,8 @@ Two rules that the web does not enforce:
    payment processor, decides that.
 
 This version specifies two handlers: **hosted checkout** (`stripe`; the processor draws the card form on its own domain)
-and a **card sheet** (`stripe-card`; the host draws the form, see "Card sheet" below). A wallet sheet (Apple Pay,
-Google Pay, the browser's Payment Request API) is not yet specified.
+and a **card sheet** (`stripe-card`; the host draws the form, see "Card sheet" below), which may also offer
+Google Pay (`stripe-wallet`, see "Wallet" below).
 
 ## Parties
 
@@ -183,6 +183,39 @@ The return lands where any other payment return does, so the prototype's `.local
 below still apply. An iframe in the dialog was rejected: many banks refuse to be framed, and the user could not check
 the page's address.
 
+### Wallet (`stripe-wallet`)
+
+An app may also offer the wallet on the card sheet by listing `stripe-wallet` next to `stripe-card` in `payments.handlers`.
+It is a way of filling the same sheet, not another flow: the server's reply, `/confirm`, 3-D Secure and the webhook are
+unchanged, and so are the five attempts. This version supports Google Pay, through the browser's Payment Request API with
+Stripe as the gateway. Apple Pay needs merchant validation and a verified domain, which the host cannot do for an app, so
+it is left out.
+
+```
+Host: the sheet is shown with  wallet: { publishableKey, environment, merchantId? }
+Window: if the browser has PaymentRequest and canMakePayment() is true, shows [Pay with Google Pay] above the card form
+User clicks ──► Window: new PaymentRequest(google.com/pay, total + lines from the sheet).show()   (the browser's own wallet UI)
+Wallet ──► Window: { paymentMethodData.tokenizationData.token: '{"id":"tok_...", ...}' }
+Window ── POST prompt/wallet { id, token } ──► Host: the token must be JSON with an id of the form tok_...
+Host ── POST {api}/v1/payment_methods  (Bearer publishable key; type=card, card[token]=tok_...) ──► Processor ──► pm_...
+Host ── POST {payments.server}/confirm ... as for a typed card
+```
+
+- **Offered only when it can work.** The manifest lists `stripe-wallet`; and the key is a test key (Google's `TEST`
+  environment needs no registration), or `payments.merchant.google_merchant_id` is set (`PRODUCTION`). Otherwise the sheet
+  is the card form alone.
+- **The request is built from the host's own prompt**: the validated summary (total and lines), the app's name from the
+  manifest, and the manifest's key. Nothing the component said is in it. The total shown by the wallet is the sheet's total.
+- **The component never sees the token**, the card behind it, or the payment method; neither does analytics (the token is
+  redacted from error text) or the app's server, which receives only the `pm_...`.
+- **Only a Stripe token is passed on.** Anything that is not JSON, has no `id`, or has an `id` that is not `tok_` followed by
+  letters, digits and underscores is refused before anything is sent. At most 8 KB.
+- **Closing the wallet is not a failure.** The card form stays, and nothing counts as an attempt until a token is submitted.
+- **The stand-in** accepts Stripe's test tokens as `card[token]`: `tok_visa` pays, `tok_chargeDeclined` is declined,
+  `tok_threeDSecureRequired` asks for verification.
+- **Not run against Google Pay.** The browser part (`canMakePayment`, `show`) has not been exercised against a real wallet; the
+  host's side is tested against the stand-in.
+
 ### Server duties
 
 On `/confirm`: require a signed-in user (`401`), the order owned by that user and unpaid (`404` / `409`), and an intent
@@ -228,6 +261,7 @@ returns the same checkout rather than a second one.
 |---|---|---|
 | `stripe` | `checkout.stripe.com` | `Stripe-Signature` (HMAC-SHA256, `t=` timestamp, `v1=` signature) |
 | `stripe-card` | none: the host draws the form and the card goes to `api.stripe.com` | as above |
+| `stripe-wallet` | an option on the card sheet, not a handler of its own: the wallet's token goes to `api.stripe.com` | as above |
 
 ## Prototype constraint: where the return lands
 
@@ -238,7 +272,7 @@ Navigator would claim the app's domain and has no such limit.
 
 ## Not specified yet
 
-- A wallet sheet, and the tokens it would produce (`payments.request` does not return one)
+- Apple Pay, and wallets other than Google Pay
 - Recurring payments and mandates (`payments.mandate`)
 - Refunds, disputes, and receipts shown by the host
 - Currency display rules beyond the ISO code; tax and shipping (the server includes them in the order)

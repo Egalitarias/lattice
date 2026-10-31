@@ -134,7 +134,8 @@
           "properties": {
             "domain": { "$ref": "#/$defs/domain" },
             "stripe_account": { "type": "string", "pattern": "^acct_[A-Za-z0-9]+$" },
-            "stripe_publishable_key": { "type": "string", "pattern": "^pk_(test|live)_[A-Za-z0-9]+$" }
+            "stripe_publishable_key": { "type": "string", "pattern": "^pk_(test|live)_[A-Za-z0-9]+$" },
+            "google_merchant_id": { "description": "Google Pay merchant id; required for the wallet sheet with a live key.", "type": "string", "pattern": "^[A-Za-z0-9]{8,32}$" }
           }
         },
         "server": { "type": "string", "pattern": "^https://" }

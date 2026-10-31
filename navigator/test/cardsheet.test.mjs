@@ -18,6 +18,7 @@ const card = (h, id, over = {}) => h.call("/_navigator/prompt/card", { id, ...GO
 async function startCardPurchase(h) {
   assert.equal((await h.signInOidc("alice")).res.status, 200);
   const pending = h.press(UPGRADE);
+  pending.catch(() => {}); // a test that ends with the sheet open must not fail when the stack closes
   const prompt = await h.waitPrompt("payment");
   return { pending, prompt };
 }
@@ -387,4 +388,102 @@ test("host: the bank's address must be one the handler may use; anything else en
     assert.match(r.submitted.error, /verify/);
     assert.equal(r.outcome, "unavailable", "the app is told it did not go through");
   }
+});
+
+// ---- Wallet (Google Pay through the browser's Payment Request API) ------------------------------------------------------
+
+const walletStack = (fn, opts = {}) => stack(fn, { wallet: true, ...opts });
+const wallet = (h, id, token) => h.call("/_navigator/prompt/wallet", { id, token: typeof token === "string" ? token : JSON.stringify(token) });
+
+test("wallet: an app that does not opt in gets no wallet, and the endpoint refuses a token", async () => {
+  await stack(async (h) => {
+    const { prompt } = await startCardPurchase(h);
+    assert.equal(prompt.wallet, undefined);
+    const r = await wallet(h, prompt.id, { id: "tok_visa" });
+    assert.equal(r.status, 422);
+    assert.match(r.body.error, /does not take a wallet/);
+  });
+});
+
+test("wallet: the window is given what it needs to ask the wallet, and the token pays; the webhook unlocks Pro", async () => {
+  await walletStack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    // The key is public by design; the environment follows the key, and no merchant id is needed for a test key.
+    assert.deepEqual(prompt.wallet, { publishableKey: h.psp.publishableKey, environment: "TEST" });
+    assert.equal((await wallet(h, prompt.id, { id: "tok_visa", object: "token" })).status, 200);
+    assert.equal((await pending).status, 200);
+    assert.equal([...h.payments.orders.values()][0].status, "paid");
+    assert.ok(await until(() => isPro(h)));
+  });
+});
+
+test("wallet: a declined wallet card keeps the sheet open, and the form still works", async () => {
+  await walletStack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    const declined = await wallet(h, prompt.id, { id: "tok_chargeDeclined" });
+    assert.equal(declined.status, 422);
+    assert.match(declined.body.error, /declined/i);
+    assert.equal((await h.state()).chrome.prompts.length, 1);
+    assert.equal((await card(h, prompt.id)).status, 200);
+    assert.equal((await pending).status, 200);
+  });
+});
+
+test("wallet: a card that needs the bank goes to the verification step, like a typed card", async () => {
+  await walletStack(async (h) => {
+    const { prompt } = await startCardPurchase(h);
+    assert.equal((await wallet(h, prompt.id, { id: "tok_threeDSecureRequired" })).status, 200);
+    const shown = await sheet(h);
+    assert.equal(shown.step, "verify");
+    assert.match((await wallet(h, prompt.id, { id: "tok_visa" })).body.error, /bank/);
+  });
+});
+
+test("wallet: only a token of the right shape is passed on", async () => {
+  await walletStack(async (h) => {
+    const { prompt } = await startCardPurchase(h);
+    for (const [name, token] of Object.entries({
+      "not JSON": "tok_visa",
+      "no id": "{}",
+      "a payment method, not a token": JSON.stringify({ id: "pm_abc" }),
+      "a path in the id": JSON.stringify({ id: "tok_../x" }),
+      "an id that is not text": JSON.stringify({ id: 7 }),
+      "too long": JSON.stringify({ id: "tok_" + "a".repeat(9000) }),
+    })) {
+      const r = await wallet(h, prompt.id, token);
+      assert.ok(r.status === 422 || r.status === 400, name);
+    }
+    assert.equal((await h.state()).chrome.prompts.length, 1, "the sheet is still waiting");
+    assert.equal([...h.psp.intents.values()][0].status, "requires_payment_method", "nothing was sent to be charged");
+  });
+});
+
+test("wallet: five attempts at most, shared with the card form", async () => {
+  await walletStack(async (h) => {
+    const { pending, prompt } = await startCardPurchase(h);
+    pending.catch(() => {});
+    for (let i = 0; i < 3; i++) assert.equal((await wallet(h, prompt.id, { id: "tok_chargeDeclined" })).status, 422);
+    for (let i = 0; i < 2; i++) assert.equal((await card(h, prompt.id, { number: "4000 0000 0000 0002" })).status, 422);
+    assert.match((await wallet(h, prompt.id, { id: "tok_visa" })).body.error, /Too many/);
+  });
+});
+
+test("wallet: a live key needs a Google merchant id, and a test key does not", async () => {
+  const base = { app: "tasks.localhost", payments: { handlers: ["stripe-card", "stripe-wallet"], merchant: { domain: "tasks.localhost", stripe_publishable_key: "pk_live_abc" }, server: "https://tasks.localhost/pay" } };
+  const session = { handler: "stripe-card", reference: "pi_abc123", publishable_key: "pk_live_abc", api: "https://api.stripe.com", summary: { currency: "USD", total_minor: 100, items: [{ label: "x", amount_minor: 100, quantity: 1 }] } };
+  const offered = async (manifest) => {
+    const msgs = [];
+    const prompts = new Prompts({ broadcast: (x) => msgs.push(x), app: { name: "T", domain: "tasks.localhost" }, timeoutMs: 200 });
+    const fetchImpl = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(session) });
+    const broker = new PaymentBroker({ manifest, endpoint: "http://x/pay", session: { token: () => "t" }, uiOrigin: () => "http://x", prompts, fetchImpl });
+    const done = broker.request("ord_1").catch(() => {});
+    await sleep(10);
+    const { wallet } = msgs.find((x) => x.kind === "prompt").prompt;
+    prompts.dispose();
+    await done;
+    return wallet;
+  };
+  assert.equal(await offered(base), undefined, "live key, no merchant id");
+  const withId = { ...base, payments: { ...base.payments, merchant: { ...base.payments.merchant, google_merchant_id: "BCR2DN4TXXXXXXXX" } } };
+  assert.deepEqual(await offered(withId), { publishableKey: "pk_live_abc", environment: "PRODUCTION", merchantId: "BCR2DN4TXXXXXXXX" });
 });

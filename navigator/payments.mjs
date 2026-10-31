@@ -72,6 +72,19 @@ export class PaymentBroker {
     return (this.manifest.payments?.handlers ?? []).includes("stripe-card") && !!this.manifest.payments?.merchant?.stripe_publishable_key;
   }
 
+  /**
+   * Can the sheet also offer a wallet (Google Pay, through the browser's Payment Request API)? The manifest must opt in with
+   * `stripe-wallet`. Google needs a merchant id for real payments; a test key needs none. Returns what the window needs, or null.
+   */
+  #walletOffer(publishableKey) {
+    const m = this.manifest.payments;
+    if (!(m?.handlers ?? []).includes("stripe-wallet")) return null;
+    const test = publishableKey.startsWith("pk_test_");
+    const merchantId = m.merchant?.google_merchant_id;
+    if (!test && !merchantId) return null;
+    return { publishableKey, environment: test ? "TEST" : "PRODUCTION", ...(merchantId ? { merchantId } : {}) };
+  }
+
   /** The processor's API address for a card sheet: its fixed host, or in development a loopback one. Origin only. */
   #apiOk(handler, value) {
     let u;
@@ -169,8 +182,9 @@ export class PaymentBroker {
     if (HANDLERS[checked.handler].card) {
       // The host draws the form. Nothing the user types goes anywhere the host did not choose: the processor's API
       // (tokenising) and the app's own server (confirming). The component sees neither.
+      const wallet = this.#walletOffer(checked.publishableKey);
       await this.prompts.ask(
-        { flow: "payment", method: "card", handlerHost: new URL(checked.api).host, summary: checked.summary, app },
+        { flow: "payment", method: "card", handlerHost: new URL(checked.api).host, summary: checked.summary, app, ...(wallet ? { wallet } : {}) },
         { state, handler: checked.handler, orderRef, reference: checked.reference, api: checked.api, publishableKey: checked.publishableKey, attempts: 0, busy: false, timeoutMs: this.timeoutMs }
       );
       return { orderRef, handler: checked.handler };
@@ -194,6 +208,30 @@ export class PaymentBroker {
    * function except to the processor's tokenising endpoint, and what comes back from there is a token.
    */
   async submitCard(id, input) {
+    return this.#attempt(id, () => {
+      const checked = checkCard(input);
+      if (!checked.ok) return checked;
+      const { number, exp_month, exp_year, cvc } = checked.card;
+      return { ok: true, fields: { type: "card", "card[number]": number, "card[exp_month]": String(exp_month), "card[exp_year]": String(exp_year), "card[cvc]": cvc } };
+    });
+  }
+
+  /**
+   * The user approved the payment in their wallet, in the window; `token` is what the wallet handed back (for Google Pay with
+   * Stripe's gateway, a JSON text holding a Stripe token). Same rules and the same attempts as a card typed into the form.
+   */
+  async submitWallet(id, token) {
+    return this.#attempt(id, (entry) => {
+      if (!entry.prompt.wallet) return { ok: false, error: "This payment does not take a wallet." };
+      let parsed;
+      try { parsed = typeof token === "string" && token.length <= 8192 ? JSON.parse(token) : null; } catch { parsed = null; }
+      if (typeof parsed?.id !== "string" || !/^tok_[A-Za-z0-9_]{1,64}$/.test(parsed.id)) return { ok: false, error: "The wallet did not give a usable payment. Nothing was charged." };
+      return { ok: true, fields: { type: "card", "card[token]": parsed.id } };
+    });
+  }
+
+  /** What every way of paying shares: the sheet must be waiting, one attempt at a time, five at most. */
+  async #attempt(id, prepare) {
     const entry = this.prompts.get(id);
     if (!entry || entry.prompt.flow !== "payment" || entry.prompt.method !== "card") return { ok: false, error: "That payment is no longer waiting." };
     if (entry.busy) return { ok: false, error: "Your payment is already being processed." };
@@ -202,12 +240,12 @@ export class PaymentBroker {
       this.prompts.settle(id, "reject", fail("cancelled"));
       return { ok: false, error: "Too many attempts. Start again from the app." };
     }
-    const checked = checkCard(input);
-    if (!checked.ok) return checked;
+    const prepared = prepare(entry);
+    if (!prepared.ok) return prepared;
     entry.busy = true;
     entry.attempts++;
     try {
-      const pm = await this.#tokenise(entry, checked.card);
+      const pm = await this.#tokenise(entry, prepared.fields);
       if (!pm.ok) return pm;
       const confirmed = await this.#confirm(entry, pm.id);
       if (!confirmed.ok) return confirmed;
@@ -218,9 +256,9 @@ export class PaymentBroker {
     }
   }
 
-  /** Card -> payment method token, straight to the processor with the publishable key. */
-  async #tokenise(entry, card) {
-    const form = new URLSearchParams({ type: "card", "card[number]": card.number, "card[exp_month]": String(card.exp_month), "card[exp_year]": String(card.exp_year), "card[cvc]": card.cvc });
+  /** Card or wallet token -> payment method, straight to the processor with the publishable key. */
+  async #tokenise(entry, fields) {
+    const form = new URLSearchParams(fields);
     let res;
     try {
       res = await this.fetchImpl(`${entry.api}/v1/payment_methods`, {

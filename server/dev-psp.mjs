@@ -137,6 +137,14 @@ export async function startPsp({ port = 0, secretKey = "sk_test_dev", publishabl
           const p = nest(new URLSearchParams(await body(req)));
           const bad = (m, param) => stripeError(res, 400, "invalid_request_error", m, { param });
           if (p.type !== "card" || !p.card) return bad("Only type=card is supported by the dev processor.", "type");
+          // A wallet's token, as Stripe's test tokens: tok_visa pays, tok_chargeDeclined is declined, tok_threeDSecureRequired asks for verification.
+          if (p.card.token !== undefined) {
+            const behaviour = { tok_visa: "pay", tok_chargeDeclined: "decline", tok_threeDSecureRequired: "authenticate" }[p.card.token];
+            if (!behaviour) return stripeError(res, 400, "invalid_request_error", `No such token: '${p.card.token}'`, { param: "card[token]" });
+            const id = `pm_${rid(24)}`;
+            methods.set(id, { behaviour, last4: "4242" });
+            return json(res, 200, { id, object: "payment_method", type: "card", livemode: false, card: { brand: "visa", last4: "4242", wallet: { type: "google_pay" } } });
+          }
           const number = String(p.card.number ?? "").replace(/[ -]/g, "");
           if (!/^\d{12,19}$/.test(number) || !luhn(number)) return stripeError(res, 402, "card_error", "Your card number is incorrect.", { code: "incorrect_number", param: "number" });
           const month = Number(p.card.exp_month), year = Number(p.card.exp_year);

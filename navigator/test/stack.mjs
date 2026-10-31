@@ -30,7 +30,7 @@ export const SHARED_CACHE = join(tmpdir(), "lattice-navigator-test-cache");
 
 // ---- A complete stack: dev IdP + tasks origin + Navigator ---------------------------------------
 
-export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, cardSheet = false, pspOptions = {}, analyticsOptions } = {}) {
+export async function withStack(fn, { requires, clientSecret, authTimeoutMs, watchdogMs, trustIdp = true, psp: wantPsp = false, cardSheet = false, wallet = false, pspOptions = {}, analyticsOptions } = {}) {
   const idp = await startIdp({ clientSecret });
   const psp = wantPsp ? await startPsp(pspOptions) : null;
   const app = await loadApp({
@@ -41,6 +41,7 @@ export async function withStack(fn, { requires, clientSecret, authTimeoutMs, wat
     log: quiet,
   });
   if (requires) app.manifest.capabilities = { requires };
+  if (wallet) app.manifest.payments.handlers.push("stripe-wallet");
   const origin = createServer(app);
   const originPort = await listen(origin);
   psp?.configure({ webhookUrl: `http://127.0.0.1:${originPort}/pay/webhook` });

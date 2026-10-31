@@ -469,6 +469,16 @@ export class Controller {
         return;
       }
 
+      // The wallet's answer to a payment the window asked it for. Like a card, it goes to the broker and nowhere else.
+      case "prompt/wallet": {
+        if (!this.payments) throw new HttpError(404, "no such endpoint");
+        if (typeof body.id !== "string" || typeof body.token !== "string" || body.token.length > 8192) throw new HttpError(400, "bad wallet payment");
+        this.analytics?.noteSensitive([body.token]);
+        const r = await this.payments.submitWallet(body.id, body.token);
+        if (!r.ok) throw new HttpError(422, r.error);
+        return;
+      }
+
       // Cancel any pending prompt (sign-in or payment). The older path is kept as an alias.
       case "prompt/cancel":
       case "auth/cancel":

@@ -561,9 +561,74 @@ function showCardSheet(p, d, parts, status, cancel) {
     number.input.focus();
   });
   if (p.error) status.textContent = p.error;
-  dialog.replaceChildren(...parts, form);
+  const wallet = p.wallet ? walletButton(p, status) : null;
+  dialog.replaceChildren(...parts, ...(wallet ? [wallet] : []), form);
   if (!dialog.open) dialog.showModal();
   number.input.focus();
+}
+
+/** "4.00": minor units as the decimal string the Payment Request API wants. */
+function decimal(minor, currency) {
+  const digits = new Intl.NumberFormat(undefined, { style: "currency", currency }).resolvedOptions().maximumFractionDigits;
+  return (minor / 10 ** digits).toFixed(digits);
+}
+
+/**
+ * Pay with Google Pay, through the browser's Payment Request API. Everything in the request comes from the host's own prompt
+ * (the validated summary and the manifest's key), not from the app. The wallet hands back a processor token; it goes to the
+ * host, which turns it into a payment method and has the app's server confirm. Returns null where the browser has no wallet.
+ */
+function walletButton(p, status) {
+  if (!window.PaymentRequest) return null;
+  const { currency, total_minor: total, items } = p.summary;
+  let request;
+  try {
+    request = () => new PaymentRequest(
+      [{
+        supportedMethods: "https://google.com/pay",
+        data: {
+          environment: p.wallet.environment,
+          apiVersion: 2,
+          apiVersionMinor: 0,
+          merchantInfo: { merchantName: p.app.name, ...(p.wallet.merchantId ? { merchantId: p.wallet.merchantId } : {}) },
+          allowedPaymentMethods: [{
+            type: "CARD",
+            parameters: { allowedAuthMethods: ["PAN_ONLY", "CRYPTOGRAM_3DS"], allowedCardNetworks: ["AMEX", "DISCOVER", "MASTERCARD", "VISA"] },
+            tokenizationSpecification: { type: "PAYMENT_GATEWAY", parameters: { gateway: "stripe", "stripe:version": "2018-10-31", "stripe:publishableKey": p.wallet.publishableKey } },
+          }],
+        },
+      }],
+      {
+        total: { label: p.app.name, amount: { currency, value: decimal(total, currency) } },
+        displayItems: items.map((i) => ({ label: i.label, amount: { currency, value: decimal(i.amount_minor * i.quantity, currency) } })),
+      }
+    );
+    request(); // built once now to find out whether the browser accepts it
+  } catch {
+    return null;
+  }
+  const button = h("button", { type: "button", "data-emphasis": "primary" }, "Pay with Google Pay");
+  const box = kids(h("div", { class: "stack", "data-axis": "vertical", "data-gap": "sm", hidden: true }), button, h("p", {}, "Or pay by card:"));
+  // Shown only if the user has a card in the wallet; asking does not open anything.
+  request().canMakePayment().then((ok) => { box.hidden = !ok; }, () => {});
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    let response;
+    try {
+      response = await request().show();
+    } catch {
+      // The user closed the wallet, or it could not open. The card form is still there.
+      button.disabled = false;
+      return;
+    }
+    status.textContent = "Paying…";
+    const token = response.details?.paymentMethodData?.tokenizationData?.token;
+    const r = typeof token === "string" ? await transport.post("prompt/wallet", { id: p.id, token }) : { ok: false, error: "The wallet did not give a usable payment." };
+    await response.complete(r.ok ? "success" : "fail").catch(() => {});
+    if (!r.ok) status.textContent = r.error ?? "The payment did not go through.";
+    button.disabled = false;
+  });
+  return box;
 }
 
 function closeAuth(id) {
